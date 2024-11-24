@@ -1,32 +1,65 @@
-This project tried to add physics information in AI model.  
-Some information:  
-### 1. 数据准备
+# CanglongPhysics
 
-- 假设您有 40 年的 ERA5 降水数据，空间分辨率为 721×1440721 \times 1440721×1440（对应于全球覆盖的网格点）。
+This project tried to add physics information in AI model.  
+
+We want to build model like below:
+
+![](https://imagecollection.oss-cn-beijing.aliyuncs.com/office/20241124203548.png)
+
+## Physical information
+
+### Data scale  
+
+一种技巧是学习原始数据的Scale
+
+1. 数据准备
+
+- 假设您有 40 年的 ERA5 降水数据，空间分辨率为 721×1440（对应于全球覆盖的网格点）。
 - 将这 40 年的数据按小时、日或月等时间步长读取，具体时间步取决于预测需求（例如，逐小时或逐日）。
 
-### 2. 计算降水差值（趋势）
+2. 计算降水差值（趋势）
 
-- 对于每个网格点 (i,j)(i, j)(i,j) 和每个时间点 ttt，计算降水量的时间差值（即变化率）。假设时间步长为 Δt\Delta tΔt（例如1小时或1天），差值计算公式为： ΔPi,j,t=Pi,j,t+Δt−Pi,j,t\Delta P_{i,j,t} = P_{i,j,t+\Delta t} - P_{i,j,t}ΔPi,j,t=Pi,j,t+Δt−Pi,j,t 这里，ΔPi,j,t\Delta P_{i,j,t}ΔPi,j,t 表示在时间 ttt 到 t+Δtt+\Delta tt+Δt 之间的降水变化量。这个过程会为每个网格点和每个时间点生成一组降水差值数据。
+- 对于每个网格点 $ (i,j)(i, j)(i,j) $$和每个时间点 ttt，计算降水量的时间差值（即变化率）。假设时间步长为 Δt\Delta tΔt（例如1小时或1天），差值计算公式为： 
 
-### 3. 汇总所有网格点和时间的差值数据
+$$
+
+\Delta P_{i,j,t} = P_{i,j,t+\Delta t} - P_{i,j,t}
+$$
+
+
+
+- 这个过程会为每个网格点和每个时间点生成一组降水差值数据。
+
+3. 汇总所有网格点和时间的差值数据
 
 - 将 40 年的所有差值数据汇总，这样得到的差值数据集合将包括所有网格点和时间点上的降水差值量（趋势）。
-- 假设您有 NNN 个时间点（例如 40 年逐日数据约为 14600 天），那么每个网格点上将会有 NNN 个差值。
+- 假设您有 N个时间点（例如 40 年逐日数据约为 14600 天），那么每个网格点上将会有 N个差值。
 
-### 4. 计算差值数据的标准差
+4. 计算差值数据的标准差
 
-- 将所有网格点和时间点的降水差值放在一起，计算其标准差，以此获得降水趋势的“典型变化尺度”。 σΔP=1N∑k=1N(ΔPk−ΔPˉ)2\sigma_{\Delta P} = \sqrt{\frac{1}{N} \sum_{k=1}^N (\Delta P_k - \bar{\Delta P})^2}σΔP=N1k=1∑N(ΔPk−ΔPˉ)2 其中，ΔPk\Delta P_kΔPk 是第 kkk 个差值样本，ΔPˉ\bar{\Delta P}ΔPˉ 是所有差值的均值，NNN 是总的差值数量（即 40 年的所有网格点和时间点的总数）。
+- 将所有网格点和时间点的降水差值放在一起，计算其标准差，以此获得降水趋势的“典型变化尺度”。 
+  $$
+  \sigma_{\Delta P} = \sqrt{\frac{1}{N} \sum_{k=1}^N (\Delta P_k - \bar{\Delta P})^2}
+  $$
+  
 
-### 5. 生成缩放因子
+5. 生成缩放因子
 
-- 根据 NeuralGCM 的方法，将标准差缩小为 0.01 倍，作为降水趋势的缩放因子。 降水缩放因子=0.01×σΔP\text{降水缩放因子} = 0.01 \times \sigma_{\Delta P}降水缩放因子=0.01×σΔP
+- 根据 NeuralGCM 的方法，将标准差缩小为 0.01 倍，作为降水趋势的缩放因子。 降水缩放因子:
 
-### 6. 应用缩放因子
+$$
+\text{降水缩放因子} = 0.01 \times \sigma_{\Delta P}
+$$
+
+
+
+6. 应用缩放因子
 
 - 在训练过程中，将深度学习模块输出的降水趋势与该缩放因子相乘，使输出值符合真实降水变化的物理尺度。
 
+### PINN physics
 
+some useful link:
 
 [Navier-Stokes by PINNs || Physics Informed Reinforcement Learning || Seminar on_哔哩哔哩_bilibili](https://www.bilibili.com/video/BV1Ej411Y7A2/?vd_source=5cd6007d3cde7a1d36157e015bd4aef0)
 
@@ -34,9 +67,11 @@ Some information:
 
 [纳维-斯托克斯（Navier-Stokes）方程的推导 – 四都教育](https://sudoedu.com/数学物理方程视频课程/数学物理方程的导出/纳维-斯托克斯（navier-stokes）方程的推导/)
 
+### Codebook
 
+Another useful model could be codebook
 
-### 意义与优点分析
+Esser, P., Rombach, R., & Ommer, B. (2021). *Taming Transformers for High-Resolution Image Synthesis* (No. arXiv:2012.09841). arXiv. https://doi.org/10.48550/arXiv.2012.09841
 
 1. **特征表示的离散化**：
    - 原始的连续特征图（如降水数据的特征图）中的每个位置都可能有大量的细节变化和微小噪声。通过向量量化，特征图中每个位置的连续特征向量被离散化到固定的代码本集合中，从而减少特征中的随机波动，形成更具有代表性的**离散特征**。
