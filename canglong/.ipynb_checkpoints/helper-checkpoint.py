@@ -51,7 +51,7 @@ class UpSampleBlock(nn.Module):
         self.conv = nn.Conv3d(channels, channels, kernel_size=(1, 3, 3), stride=1,padding=(0, 1, 1))
 
     def forward(self, x):
-        print(x.shape, 'before inter')
+
         x = F.interpolate(x, scale_factor=(1, 2, 2))
 
         return self.conv(x)
