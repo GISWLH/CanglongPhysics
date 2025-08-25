@@ -57,8 +57,8 @@ def upload_to_ftp(ftp_host, ftp_user, ftp_password, local_file_path, ftp_directo
         print(f"Error uploading file: {e}")
         return False
     
-demo_start_time = '2025-07-30'
-demo_end_time = '2025-08-12'
+demo_start_time = '2025-08-06'
+demo_end_time = '2025-08-19'
 
 import rioxarray
 from ftplib import FTP

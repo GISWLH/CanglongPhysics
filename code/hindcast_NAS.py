@@ -20,10 +20,10 @@ import tempfile
 import os
 
 # 验证关键参数配置
-demo_start_time = '2025-07-30'
-demo_end_time = '2025-08-12'
-forecast_start_week = 32
-hindcast_start_week = 31
+demo_start_time = '2025-08-06'
+demo_end_time = '2025-08-19'
+forecast_start_week = 33
+hindcast_start_week = 32
 
 # Nature风格绘图配置
 def setup_nature_style():

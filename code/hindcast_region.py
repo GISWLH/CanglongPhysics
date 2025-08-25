@@ -22,10 +22,10 @@ import os
 import geopandas as gpd
 
 # 验证关键参数配置 - 修改为与现有ECMWF文件匹配的日期
-demo_start_time = '2025-07-02'  
-demo_end_time = '2025-07-15'
-forecast_start_week = 29
-hindcast_start_week = 28
+demo_start_time = '2025-08-06'
+demo_end_time = '2025-08-19'
+forecast_start_week = 33
+hindcast_start_week = 32
 
 # 区域配置 - 默认使用中国shapefile，可以自定义
 SHAPEFILE_PATH = '/home/lhwang/Desktop/CanglongPhysics/code/data/china.shp'
@@ -527,24 +527,30 @@ def load_all_data_from_nas_with_shapefile():
         else:
             print(f"    CAS-Canglong Lead{lead_week}: 文件不存在 - {filename}")
     
-    # 3. 从本地加载ECMWF数据
+    # 3. 从NAS下载ECMWF数据
     ecmwf_data = {}
-    print("从本地加载ECMWF数据...")
-    
-    ecmwf_temp_dir = local_data_dir / 'ecmwf' / 'T'
-    ecmwf_precip_dir = local_data_dir / 'ecmwf' / 'P'
+    print("从NAS下载ECMWF数据...")
     
     for temp_file, precip_file, time_idx, lead_week in ecmwf_configs:
-        print(f"  加载ECMWF Lead{lead_week}: {temp_file}, {precip_file}")
+        print(f"  下载ECMWF Lead{lead_week}: {temp_file}, {precip_file}")
         
-        # 本地文件路径
-        temp_local_path = ecmwf_temp_dir / temp_file
-        precip_local_path = ecmwf_precip_dir / precip_file
+        # 下载温度和降水文件
+        temp_remote_path = f"{NAS_CONFIG['temp_base_path']}/{temp_file}"
+        precip_remote_path = f"{NAS_CONFIG['precip_base_path']}/{precip_file}"
         
-        if temp_local_path.exists() and precip_local_path.exists():
+        temp_local_file = download_from_nas(temp_remote_path)
+        precip_local_file = download_from_nas(precip_remote_path)
+        
+        temp_files_to_cleanup = []
+        if temp_local_file:
+            temp_files_to_cleanup.append(temp_local_file)
+        if precip_local_file:
+            temp_files_to_cleanup.append(precip_local_file)
+        
+        if temp_local_file and precip_local_file:
             try:
-                temp_data = rxr.open_rasterio(str(temp_local_path))
-                precip_data = rxr.open_rasterio(str(precip_local_path))
+                temp_data = rxr.open_rasterio(temp_local_file)
+                precip_data = rxr.open_rasterio(precip_local_file)
                 
                 # 检查时间索引是否有效
                 if time_idx < temp_data.sizes['band']:
@@ -559,23 +565,32 @@ def load_all_data_from_nas_with_shapefile():
                     temp_cropped = crop_data_with_shapefile(temp_ds, SHAPEFILE_PATH)['temperature']
                     precip_cropped = crop_data_with_shapefile(precip_ds, SHAPEFILE_PATH)['precipitation']
                     
-                    # 尝试加载露点温度文件
+                    # 尝试下载露点温度文件，优先从dewpoint专用路径获取
                     dewpoint_file = temp_file.replace('Tavg_', 'Tdew_')
-                    dewpoint_local_path = ecmwf_temp_dir / dewpoint_file
+                    dewpoint_remote_path = f"{NAS_CONFIG['dewpoint_path']}/{dewpoint_file}"
+                    print(f"    尝试从dewpoint路径获取: {dewpoint_remote_path}")
+                    dewpoint_local_file = download_from_nas(dewpoint_remote_path)
                     
-                    if dewpoint_local_path.exists():
+                    # 如果dewpoint路径没有，尝试原温度路径
+                    if dewpoint_local_file is None:
+                        dewpoint_remote_path_alt = f"{NAS_CONFIG['temp_base_path']}/{dewpoint_file}"
+                        print(f"    备用路径尝试: {dewpoint_remote_path_alt}")
+                        dewpoint_local_file = download_from_nas(dewpoint_remote_path_alt)
+                    
+                    if dewpoint_local_file:
+                        temp_files_to_cleanup.append(dewpoint_local_file)
                         try:
-                            dewpoint_data = rxr.open_rasterio(str(dewpoint_local_path))
+                            dewpoint_data = rxr.open_rasterio(dewpoint_local_file)
                             dewpoint_celsius = dewpoint_data.isel(band=time_idx)
                             dewpoint_ds = dewpoint_celsius.to_dataset(name='dewpoint')
                             dewpoint_cropped = crop_data_with_shapefile(dewpoint_ds, SHAPEFILE_PATH)['dewpoint']
                             pet = calculate_pet_with_dewpoint(temp_cropped, dewpoint_cropped)
                             print(f"    使用露点温度计算PET: {dewpoint_file}")
                         except Exception as e:
-                            print(f"    露点温度文件处理失败，使用简化PET: {e}")
+                            print(f"    露点温度处理失败，使用简化PET: {e}")
                             pet = calculate_pet_simple_fallback(temp_cropped)
                     else:
-                        print(f"    露点温度文件不存在，使用简化PET: {dewpoint_file}")
+                        print(f"    露点温度文件不存在，使用简化PET")
                         pet = calculate_pet_simple_fallback(temp_cropped)
                     
                     spei = calculate_spei_simple(precip_cropped, pet)
@@ -592,8 +607,16 @@ def load_all_data_from_nas_with_shapefile():
             
             except Exception as e:
                 print(f"    ECMWF Lead{lead_week}: 处理失败 - {e}")
+            
+            finally:
+                # 清理临时文件
+                for temp_file_path in temp_files_to_cleanup:
+                    try:
+                        os.unlink(temp_file_path)
+                    except:
+                        pass
         else:
-            print(f"    ECMWF Lead{lead_week}: 文件不存在 - {temp_file}, {precip_file}")
+            print(f"    ECMWF Lead{lead_week}: 下载失败")
     
     return obs_processed, canglong_data, ecmwf_data
 
