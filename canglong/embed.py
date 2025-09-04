@@ -264,16 +264,16 @@ class ImageToPatch4D(nn.Module):
     def __init__(self, img_dims, patch_dims, in_channels, out_channels, normalization_layer=None):
         super().__init__()
         self.img_dims = img_dims
-        time, depth, height, width = img_dims
-        patch_t, patch_d, patch_h, patch_w = patch_dims
+        feature, depth, time, height, width = img_dims
+        patch_d, patch_t, patch_h, patch_w = patch_dims
 
         # 初始化填充变量
         padding_time_front = padding_time_back = padding_depth_front = padding_depth_back = 0
         padding_top = padding_bottom = padding_left = padding_right = 0
 
         # 计算每个维度的余数并设置填充
-        time_mod = time % patch_t
-        depth_mod = depth % patch_d
+        time_mod = time % patch_t # 2 % 2
+        depth_mod = depth % patch_d 
         height_mod = height % patch_h
         width_mod = width % patch_w
 
@@ -303,6 +303,14 @@ class ImageToPatch4D(nn.Module):
              padding_depth_front, padding_depth_back, padding_time_front, padding_time_back),
             0
         )
+        
+        ## 下面这段新增的
+        self.padding_params = (
+            padding_left, padding_right,  # W维度
+            padding_top, padding_bottom,  # H维度
+            padding_time_front, padding_time_back,  # T维度
+            padding_depth_front, padding_depth_back  # D维度
+        )
 
         # Conv4d 投影层
         self.projection = Conv4d(in_channels, out_channels, kernel_size=patch_dims, stride=patch_dims)
@@ -314,10 +322,15 @@ class ImageToPatch4D(nn.Module):
             self.normalization = None
 
     def forward(self, x: torch.Tensor):
-        B, C, T, D, H, W = x.shape
-        assert C == self.img_dims[0] and T == self.img_dims[1] and H == self.img_dims[2] and W == self.img_dims[3], \
-            f"输入图像尺寸 ({C}x{T}x{H}x{W}) 与模型预期 ({self.img_dims[0]}x{self.img_dims[1]}x{self.img_dims[2]}x{self.img_dims[3]}) 不符。"
-        x = self.padding(x)
+        B, C, D, T, H, W = x.shape
+        assert C == self.img_dims[0] and D == self.img_dims[1] and T == self.img_dims[2] and H == self.img_dims[3] and W == self.img_dims[4], \
+            f"输入图像尺寸 ({C}x{D}x{T}x{H}x{W}) 与模型预期 ({self.img_dims[0]}x{self.img_dims[1]}x{self.img_dims[2]}x{self.img_dims[3]}x{self.img_dims[4]}) 不符。"
+        
+        # x = self.padding(x) 替换下一块
+        x = F.pad(x, self.padding_params, mode='constant', value=0)
+        
+        
+        
         x = self.projection(x)
         if self.normalization:
             x = self.normalization(x.permute(0, 2, 3, 4, 5, 1)).permute(0, 5, 1, 2, 3, 4)

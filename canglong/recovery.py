@@ -215,9 +215,10 @@ class RecoveryImage4D(nn.Module):
         output_channels (int): 输出的通道数。
     """
 
-    def __init__(self, image_size, patch_size, input_channels, output_channels):
+    def __init__(self, image_size, patch_size, input_channels, output_channels, target_size=None):
         super(RecoveryImage4D, self).__init__()
         self.image_size = image_size
+        self.target_size = target_size if target_size else image_size
         self.conv_transpose4d = ConvTranspose4d(
             in_channels=input_channels,
             out_channels=output_channels,
@@ -230,16 +231,17 @@ class RecoveryImage4D(nn.Module):
         x = self.conv_transpose4d(x)
 
         # 获取重构后的图像尺寸
-        _, _, pl, depth, height, width = x.shape
+        _, feature, depth, time, height, width = x.shape
+        print(x.shape, 'xxx')
 
         # 计算各个维度需要裁剪的大小
-        pl_padding = pl - self.image_size[0]
         depth_padding = depth - self.image_size[1]
-        height_padding = height - self.image_size[2]
-        width_padding = width - self.image_size[3]
+        time_padding = time - self.image_size[2]
+        height_padding = height - self.image_size[3]
+        width_padding = width - self.image_size[4]
 
-        pad_front = pl_padding // 2
-        pad_back = pl_padding - pad_front
+        pad_front = depth_padding // 2
+        pad_back = depth_padding - pad_front
 
         pad_depth_front = depth_padding // 2
         pad_depth_back = depth_padding - pad_depth_front
@@ -249,6 +251,9 @@ class RecoveryImage4D(nn.Module):
 
         pad_left = width_padding // 2
         pad_right = width_padding - pad_left
+        
+        if self.target_size != None:
+            _, target_d, target_t, target_h, target_w = self.target_size
 
         # 返回裁剪后的图像，确保尺寸匹配
-        return x[:, :, :, :, pad_top:height - pad_bottom, pad_left:width - pad_right]
+        return x[:, :, :target_d, :, pad_top:height - pad_bottom, pad_left:width - pad_right]
