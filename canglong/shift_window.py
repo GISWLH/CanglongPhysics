@@ -56,11 +56,12 @@ def create_shifted_window_mask(resolution, window_dims, shift_dims):
     win_pl, win_lat, win_lon = window_dims
     shift_pl, shift_lat, shift_lon = shift_dims
 
-    mask_tensor = torch.zeros((1, Pl, Lat, Lon + shift_lon, 1))
+    # 修正mask_tensor的形状，确保与partition_windows兼容
+    mask_tensor = torch.zeros((1, Pl, Lat, Lon, 1))
 
-    pl_segments = (slice(0, -win_pl), slice(-win_pl, -shift_pl), slice(-shift_pl, None))
-    lat_segments = (slice(0, -win_lat), slice(-win_lat, -shift_lat), slice(-shift_lat, None))
-    lon_segments = (slice(0, -win_lon), slice(-win_lon, -shift_lon), slice(-shift_lon, None))
+    pl_segments = (slice(0, -win_pl), slice(-win_pl, -shift_pl if shift_pl > 0 else None), slice(-shift_pl if shift_pl > 0 else None, None))
+    lat_segments = (slice(0, -win_lat), slice(-win_lat, -shift_lat if shift_lat > 0 else None), slice(-shift_lat if shift_lat > 0 else None, None))
+    lon_segments = (slice(0, -win_lon), slice(-win_lon, -shift_lon if shift_lon > 0 else None), slice(-shift_lon if shift_lon > 0 else None, None))
 
     counter = 0
     for pl in pl_segments:
@@ -68,8 +69,6 @@ def create_shifted_window_mask(resolution, window_dims, shift_dims):
             for lon in lon_segments:
                 mask_tensor[:, pl, lat, lon, :] = counter
                 counter += 1
-
-    mask_tensor = mask_tensor[:, :, :, :Lon, :]
 
     masked_windows = partition_windows(mask_tensor, window_dims)  # n_lon, n_pl*n_lat, win_pl, win_lat, win_lon, 1
     masked_windows = masked_windows.view(masked_windows.shape[0], masked_windows.shape[1], win_pl * win_lat * win_lon)

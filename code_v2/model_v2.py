@@ -11,7 +11,13 @@ from canglong.embed import ImageToPatch2D, ImageToPatch3D, ImageToPatch4D
 from canglong.recovery import RecoveryImage2D, RecoveryImage3D, RecoveryImage4D
 from canglong.pad import calculate_padding_3d, calculate_padding_2d
 from canglong.crop import center_crop_2d, center_crop_3d
+from canglong.wind_direction import WindDirectionProcessor
+from canglong.wind_aware_mask import WindAwareAttentionMaskGenerator
+from canglong.wind_aware_block import WindAwareEarthSpecificBlock
+from canglong.helper import ResidualBlock, NonLocalBlock, DownSampleBlock, UpSampleBlock, GroupNorm, Swish
+
 input_constant = torch.load('../constant_masks/Earth.pt', weights_only=False).cuda()
+
 
 class UpSample(nn.Module):
     """
@@ -98,190 +104,42 @@ class DownSample(nn.Module):
         return x
 
 
-class EarthAttention3D(nn.Module):
-    """
-    3D window attention with earth position bias.
-    """
-
-    def __init__(self, dim, input_resolution, window_size, num_heads, qkv_bias=True, qk_scale=None, attn_drop=0.,
-                 proj_drop=0.):
-        super().__init__()
-        self.dim = dim
-        self.window_size = window_size
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim ** -0.5
-
-        self.type_of_windows = (input_resolution[0] // window_size[0]) * (input_resolution[1] // window_size[1])
-
-        self.earth_position_bias_table = nn.Parameter(
-            torch.zeros((window_size[0] ** 2) * (window_size[1] ** 2) * (window_size[2] * 2 - 1),
-                        self.type_of_windows, num_heads)
-        )
-
-        earth_position_index = calculate_position_bias_indices(window_size)
-        self.register_buffer("earth_position_index", earth_position_index)
-
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-        trunc_normal_(self.earth_position_bias_table, std=.02)
-        self.softmax = nn.Softmax(dim=-1)
-
-    def forward(self, x: torch.Tensor, mask=None):
-        B_, nW_, N, C = x.shape
-        qkv = self.qkv(x).reshape(B_, nW_, N, 3, self.num_heads, C // self.num_heads).permute(3, 0, 4, 1, 2, 5)
-        q, k, v = qkv[0], qkv[1], qkv[2]
-
-        q = q * self.scale
-        attn = (q @ k.transpose(-2, -1))
-
-        earth_position_bias = self.earth_position_bias_table[self.earth_position_index.view(-1)].view(
-            self.window_size[0] * self.window_size[1] * self.window_size[2],
-            self.window_size[0] * self.window_size[1] * self.window_size[2],
-            self.type_of_windows, -1
-        )
-        earth_position_bias = earth_position_bias.permute(
-            3, 2, 0, 1).contiguous()
-        attn = attn + earth_position_bias.unsqueeze(0)
-
-        if mask is not None:
-            nLon = mask.shape[0]
-            attn = attn.view(B_ // nLon, nLon, self.num_heads, nW_, N, N) + mask.unsqueeze(1).unsqueeze(0)
-            attn = attn.view(-1, self.num_heads, nW_, N, N)
-            attn = self.softmax(attn)
-        else:
-            attn = self.softmax(attn)
-
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).permute(0, 2, 3, 1, 4).reshape(B_, nW_, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-
-
-class EarthSpecificBlock(nn.Module):
-    """
-    3D Transformer Block
-    """
-
-    def __init__(self, dim, input_resolution, num_heads, window_size=None, shift_size=None, mlp_ratio=4.,
-                 qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0., act_layer=nn.GELU,
-                 norm_layer=nn.LayerNorm):
-        super().__init__()
-        window_size = (2, 6, 12) if window_size is None else window_size
-        shift_size = (1, 3, 6) if shift_size is None else shift_size
-        self.dim = dim
-        self.input_resolution = input_resolution
-        self.num_heads = num_heads
-        self.window_size = window_size
-        self.shift_size = shift_size
-        self.mlp_ratio = mlp_ratio
-
-        self.norm1 = norm_layer(dim)
-        padding = calculate_padding_3d(input_resolution, window_size)
-        self.pad = nn.ZeroPad3d(padding)
-
-        pad_resolution = list(input_resolution)
-        pad_resolution[0] += (padding[-1] + padding[-2])
-        pad_resolution[1] += (padding[2] + padding[3])
-        pad_resolution[2] += (padding[0] + padding[1])
-
-        self.attn = EarthAttention3D(
-            dim=dim, input_resolution=pad_resolution, window_size=window_size, num_heads=num_heads, qkv_bias=qkv_bias,
-            qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop
-        )
-
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        self.norm2 = norm_layer(dim)
-        mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
-
-        shift_pl, shift_lat, shift_lon = self.shift_size
-        self.roll = shift_pl and shift_lon and shift_lat
-
-        if self.roll:
-            attn_mask = create_shifted_window_mask(pad_resolution, window_size, shift_size)
-        else:
-            attn_mask = None
-
-        self.register_buffer("attn_mask", attn_mask)
-
-    def forward(self, x: torch.Tensor): #revise
-        Pl, Lat, Lon = self.input_resolution
-        B, L, C = x.shape
-        assert L == Pl * Lat * Lon, "input feature has wrong size"
-
-        shortcut = x
-        x = self.norm1(x)
-        x = x.view(B, Pl, Lat, Lon, C)
-
-        x = self.pad(x.permute(0, 4, 1, 2, 3)).permute(0, 2, 3, 4, 1)
-
-        _, Pl_pad, Lat_pad, Lon_pad, _ = x.shape
-
-        shift_pl, shift_lat, shift_lon = self.shift_size
-        if self.roll:
-            shifted_x = torch.roll(x, shifts=(-shift_pl, -shift_lat, -shift_lon), dims=(1, 2, 3))
-            x_windows = partition_windows(shifted_x, self.window_size)
-        else:
-            shifted_x = x
-            x_windows = partition_windows(shifted_x, self.window_size)
-
-        win_pl, win_lat, win_lon = self.window_size
-        x_windows = x_windows.view(x_windows.shape[0], x_windows.shape[1], win_pl * win_lat * win_lon, C)
-
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)
-
-        attn_windows = attn_windows.view(attn_windows.shape[0], attn_windows.shape[1], win_pl, win_lat, win_lon, C)
-
-        if self.roll:
-            shifted_x = reverse_partition(attn_windows, self.window_size, Pl_pad, Lat_pad, Lon_pad)
-            x = torch.roll(shifted_x, shifts=(shift_pl, shift_lat, shift_lon), dims=(1, 2, 3))
-        else:
-            shifted_x = reverse_partition(attn_windows, self.window_size, Pl_pad, Lat_pad, Lon_pad)
-            x = shifted_x
-
-
-        x = center_crop_3d(x.permute(0, 4, 1, 2, 3), self.input_resolution).permute(0, 2, 3, 4, 1)
-
-        x = x.reshape(B, Pl * Lat * Lon, C)
-        x = shortcut + self.drop_path(x)
-
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-
-        return x
-
-
-
 class BasicLayer(nn.Module):
     """A basic 3D Transformer layer for one stage"""
 
     def __init__(self, dim, input_resolution, depth, num_heads, window_size, mlp_ratio=4., qkv_bias=True, qk_scale=None,
-                 drop=0., attn_drop=0., drop_path=0., norm_layer=nn.LayerNorm):
+                 drop=0., attn_drop=0., drop_path=0., norm_layer=nn.LayerNorm, use_wind_aware_shift=True):
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution
         self.depth = depth
 
+        # 风向感知的注意力掩码生成器
+        self.wind_aware_mask_generator = WindAwareAttentionMaskGenerator(input_resolution, window_size) if use_wind_aware_shift else None
+
         self.blocks = nn.ModuleList([
-            EarthSpecificBlock(dim=dim, input_resolution=input_resolution, num_heads=num_heads, window_size=window_size,
-                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,
-                               qk_scale=qk_scale, drop=drop, attn_drop=attn_drop,
-                               drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
-                               norm_layer=norm_layer)
+            WindAwareEarthSpecificBlock(
+                dim=dim, 
+                input_resolution=input_resolution, 
+                num_heads=num_heads, 
+                window_size=window_size,
+                shift_size=(0, 0, 0) if i % 2 == 0 else (window_size[0]//2, window_size[1]//2, window_size[2]//2),
+                mlp_ratio=mlp_ratio, 
+                qkv_bias=qkv_bias,
+                qk_scale=qk_scale, 
+                drop=drop, 
+                attn_drop=attn_drop,
+                drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
+                norm_layer=norm_layer,
+                use_wind_aware_shift=use_wind_aware_shift
+            )
             for i in range(depth)
         ])
 
-    def forward(self, x):
-        for blk in self.blocks:
-            x = blk(x)
+    def forward(self, x, wind_direction_id=None):
+        for i, blk in enumerate(self.blocks):
+            x = blk(x, wind_direction_id)
         return x
-
-
 
 
 class Mlp(nn.Module):
@@ -302,9 +160,6 @@ class Mlp(nn.Module):
         x = self.drop(x)
         return x
     
-import torch
-import torch.nn as nn
-from canglong.helper import ResidualBlock, NonLocalBlock, DownSampleBlock, UpSampleBlock, GroupNorm, Swish
 
 class Encoder(nn.Module):
     def __init__(self, image_channels, latent_dim):
@@ -374,6 +229,7 @@ class Encoder(nn.Module):
         
         return x
     
+
 class Decoder(nn.Module):
     def __init__(self, image_channels=14, latent_dim=64):
         super(Decoder, self).__init__()
@@ -436,16 +292,19 @@ class Decoder(nn.Module):
         return x
 
 
-
-    
-class Canglong(nn.Module):
+class CanglongV2(nn.Module):
     """
     CAS Canglong PyTorch impl of: `CAS-Canglong: A skillful 3D Transformer model for sub-seasonal to seasonal global sea surface temperature prediction`
+    Version 2 with wind-aware dynamic window shifting
     """
 
     def __init__(self, embed_dim=96, num_heads=(8, 16, 16, 8), window_size=(2, 6, 12)):
         super().__init__()
         drop_path = np.linspace(0, 0.2, 8).tolist()
+        
+        # 风向处理器
+        self.wind_direction_processor = WindDirectionProcessor(window_size=(4, 4))
+        
         self.patchembed2d = ImageToPatch2D(
             img_dims=(721, 1440),
             patch_dims=(4, 4), # 8, 8
@@ -472,7 +331,8 @@ class Canglong(nn.Module):
             depth=2,
             num_heads=num_heads[0],
             window_size=window_size,
-            drop_path=drop_path[:2]
+            drop_path=drop_path[:2],
+            use_wind_aware_shift=True  # 启用风向感知的窗口交换
         )
         self.downsample = DownSample(in_dim=embed_dim, input_resolution=(6, 181, 360), output_resolution=(6, 91, 180))
         self.layer2 = BasicLayer(
@@ -481,7 +341,8 @@ class Canglong(nn.Module):
             depth=6,
             num_heads=num_heads[1],
             window_size=window_size,
-            drop_path=drop_path[2:]
+            drop_path=drop_path[2:],
+            use_wind_aware_shift=True  # 启用风向感知的窗口交换
         )
         self.layer3 = BasicLayer(
             dim=embed_dim * 2,
@@ -489,7 +350,8 @@ class Canglong(nn.Module):
             depth=6,
             num_heads=num_heads[2],
             window_size=window_size,
-            drop_path=drop_path[2:]
+            drop_path=drop_path[2:],
+            use_wind_aware_shift=True  # 启用风向感知的窗口交换
         )
         self.upsample = UpSample(embed_dim * 2, embed_dim, (6, 91, 180), (6, 181, 360))
         self.layer4 = BasicLayer(
@@ -498,7 +360,8 @@ class Canglong(nn.Module):
             depth=2,
             num_heads=num_heads[3],
             window_size=window_size,
-            drop_path=drop_path[:2]
+            drop_path=drop_path[:2],
+            use_wind_aware_shift=True  # 启用风向感知的窗口交换
         )
         self.patchrecovery2d = RecoveryImage2D((721, 1440), (4, 4), 2 * embed_dim, 4) #8, 8
         self.decoder3d = Decoder(image_channels=17, latent_dim=2 * 96)
@@ -519,42 +382,42 @@ class Canglong(nn.Module):
 
     def forward(self, surface, upper_air):        
         
+        # 计算风向ID
+        wind_direction_id = self.wind_direction_processor(surface, upper_air)
+        
         constant = self.conv_constant(self.input_constant)
         surface = self.encoder3d(surface)
 
         upper_air = self.patchembed4d(upper_air)
-        print(upper_air.shape, 'upper_air_before')
-        print(surface.shape, 'surface_before')
-        print(constant.shape, 'constant')
+
         
         x = torch.concat([upper_air.squeeze(3), 
                           surface, 
                           constant.unsqueeze(2)], dim=2)
-        print(x.shape, 'before earthlayer')
+
         
         B, C, Pl, Lat, Lon = x.shape
 
         x = x.reshape(B, C, -1).transpose(1, 2)
         
-        x = self.layer1(x) #revise
+        # 传递风向ID到各层
+        x = self.layer1(x, wind_direction_id) #revise
 
         skip = x
 
         x = self.downsample(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
+        x = self.layer2(x, wind_direction_id)
+        x = self.layer3(x, wind_direction_id)
         x = self.upsample(x)
-        x = self.layer4(x)
+        x = self.layer4(x, wind_direction_id)
 
         output = torch.concat([x, skip], dim=-1)
         output = output.transpose(1, 2).reshape(B, -1, Pl, Lat, Lon)
-        print(output.shape, 'after earthlayer')
         output_surface = output[:, :, 3:5, :, :]  #  四五层是surface
         output_upper_air = output[:, :, 0:3, :, :]  # 前三层是upper air
 
 
         output_surface = self.decoder3d(output_surface)
-        print(output_upper_air.unsqueeze(3).shape)
         output_upper_air = self.patchrecovery4d(output_upper_air.unsqueeze(3))
         
         return output_surface, output_upper_air
@@ -562,8 +425,8 @@ class Canglong(nn.Module):
 
         # 简化输出处理来验证模型架构
         return output_surface, output_upper_air  # 只取前2层surface
-
     
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -627,34 +490,139 @@ valid_end = 40#int(total_samples * 0.8)  # 80
 
 # 创建数据集
 train_dataset = WeatherDataset(input_surface, input_upper_air, start_idx=0, end_idx=train_end)
-
+valid_dataset = WeatherDataset(input_surface, input_upper_air, start_idx=train_end, end_idx=valid_end)
 batch_size = 1  # 小batch size便于调试
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=2)  # 不打乱时间顺序
-
+valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 print(f"Created data loaders with batch size {batch_size}")
 import sys
 sys.path.append('code_v2')
 from convert_dict_to_pytorch_arrays import load_normalization_arrays
 
-# 调用函数获取四个数组
+
+# 加载标准化参数
+# 注释掉实际加载，使用模拟数据
+from convert_dict_to_pytorch_arrays import load_normalization_arrays
 json = '/home/CanglongPhysics/code_v2/ERA5_1940_2019_combined_mean_std.json'
 surface_mean, surface_std, upper_mean, upper_std = load_normalization_arrays(json)
 
 
-for idx, (input_surface, input_upper_air, target_surface, target_upper_air) in enumerate(train_loader):
-    # 将数据移动到设备
-    input_surface = ((input_surface.permute(0, 2, 1, 3, 4) - surface_mean) / surface_std).to(device)
-    input_upper_air = ((input_upper_air.permute(0, 2, 3, 1, 4, 5) - upper_mean) / upper_std).to(device)
-    target_surface = target_surface.unsqueeze(2).to(device)
-    target_upper_air = target_upper_air.unsqueeze(3).to(device)
-    print(input_surface.shape, input_upper_air.shape, target_surface.shape, target_upper_air.shape)
-    # 清除梯度
-    # optimizer.zero_grad()
 
-    model = Canglong().cuda()
-    # 前向传播
-    output_surface, output_upper_air = model(input_surface, input_upper_air)
-    print(output_surface.shape)
-    print(output_upper_air.shape)
-    if idx == 0:
-        break
+# 创建模型
+model = CanglongV2()
+#model = torch.load('../model/model_v1_100.pth')
+# 多GPU训练
+if torch.cuda.device_count() > 1:
+    print(f"Using {torch.cuda.device_count()} GPUs!")
+    model = nn.DataParallel(model)
+
+# 将模型移动到设备
+model.to(device)
+
+# 创建优化器和损失函数
+optimizer = optim.Adam(model.parameters(), lr=0.0005)
+criterion = nn.MSELoss()
+
+# 创建保存目录
+save_dir = 'checkpoints'
+os.makedirs(save_dir, exist_ok=True)
+
+# 训练参数
+num_epochs = 2
+best_valid_loss = float('inf')
+
+# 训练循环
+print("Starting training...")
+for epoch in range(num_epochs):
+    # 训练阶段
+    model.train()
+    train_loss = 0.0
+    surface_loss = 0.0
+    upper_air_loss = 0.0
+    
+    train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
+    for input_surface, input_upper_air, target_surface, target_upper_air in train_pbar:
+        # 将数据移动到设备
+        input_surface = ((input_surface.permute(0, 2, 1, 3, 4) - surface_mean) / surface_std).to(device)
+        input_upper_air = ((input_upper_air.permute(0, 2, 3, 1, 4, 5) - upper_mean) / upper_std).to(device)
+        target_surface = ((target_surface.unsqueeze(2) - surface_mean) / surface_mean).to(device)
+        target_upper_air = ((target_upper_air.unsqueeze(3) - upper_mean) / upper_std).to(device)
+        
+        # 清除梯度
+        optimizer.zero_grad()
+        
+        # 前向传播
+        output_surface, output_upper_air = model(input_surface, input_upper_air)
+        
+        # 计算损失
+        loss_surface = criterion(output_surface, target_surface)
+        loss_upper_air = criterion(output_upper_air, target_upper_air)
+        loss = loss_surface + loss_upper_air
+        
+        # 反向传播和优化
+        loss.backward()
+        optimizer.step()
+        
+        # 累加损失
+        batch_loss = loss.item()
+        train_loss += batch_loss
+        surface_loss += loss_surface.item()
+        upper_air_loss += loss_upper_air.item()
+        
+        # 更新进度条
+        train_pbar.set_postfix({
+            "loss": f"{batch_loss:.6f}",
+            "surface": f"{loss_surface.item():.6f}",
+            "upper_air": f"{loss_upper_air.item():.6f}"
+        })
+    
+    # 计算平均训练损失
+    train_loss = train_loss / len(train_loader)
+    surface_loss = surface_loss / len(train_loader)
+    upper_air_loss = upper_air_loss / len(train_loader)
+    
+    # 验证阶段
+    model.eval()
+    valid_loss = 0.0
+    valid_surface_loss = 0.0
+    valid_upper_air_loss = 0.0
+    
+    with torch.no_grad():
+        valid_pbar = tqdm(valid_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Valid]")
+        for input_surface, input_upper_air, target_surface, target_upper_air in valid_pbar:
+            # 将数据移动到设备
+            input_surface = ((input_surface.permute(0, 2, 1, 3, 4) - surface_mean) / surface_std).to(device)
+            input_upper_air = ((input_upper_air.permute(0, 2, 3, 1, 4, 5) - upper_mean) / upper_std).to(device)
+            target_surface = ((target_surface.unsqueeze(2) - surface_mean) / surface_mean).to(device)
+            target_upper_air = ((target_upper_air.unsqueeze(3) - upper_mean) / upper_std).to(device)
+            
+            # 前向传播
+            output_surface, output_upper_air = model(input_surface, input_upper_air)
+            
+            # 计算损失
+            loss_surface = criterion(output_surface, target_surface)
+            loss_upper_air = criterion(output_upper_air, target_upper_air)
+            loss = loss_surface + loss_upper_air
+            
+            # 累加损失
+            batch_loss = loss.item()
+            valid_loss += batch_loss
+            valid_surface_loss += loss_surface.item()
+            valid_upper_air_loss += loss_upper_air.item()
+            
+            # 更新进度条
+            valid_pbar.set_postfix({
+                "loss": f"{batch_loss:.6f}",
+                "surface": f"{loss_surface.item():.6f}",
+                "upper_air": f"{loss_upper_air.item():.6f}"
+            })
+    
+    # 计算平均验证损失
+    valid_loss = valid_loss / len(valid_loader)
+    valid_surface_loss = valid_surface_loss / len(valid_loader)
+    valid_upper_air_loss = valid_upper_air_loss / len(valid_loader)
+    
+    # 打印损失
+    print(f"Epoch {epoch+1}/{num_epochs}")
+    print(f"  Train - Total: {train_loss:.6f}, Surface: {surface_loss:.6f}, Upper Air: {upper_air_loss:.6f}")
+    print(f"  Valid - Total: {valid_loss:.6f}, Surface: {valid_surface_loss:.6f}, Upper Air: {valid_upper_air_loss:.6f}")

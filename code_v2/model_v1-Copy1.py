@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import numpy as np
-from timm.models.layers import trunc_normal_, DropPath
+from timm.layers import trunc_normal_, DropPath
 import torch.nn.functional as F
 import sys
 sys.path.append('..')
@@ -11,7 +11,7 @@ from canglong.embed import ImageToPatch2D, ImageToPatch3D, ImageToPatch4D
 from canglong.recovery import RecoveryImage2D, RecoveryImage3D, RecoveryImage4D
 from canglong.pad import calculate_padding_3d, calculate_padding_2d
 from canglong.crop import center_crop_2d, center_crop_3d
-input_constant = torch.load('../constant_masks/Earth.pt').cuda()
+input_constant = torch.load('../constant_masks/Earth.pt', weights_only=False).cuda()
 
 class UpSample(nn.Module):
     """
@@ -564,9 +564,97 @@ class Canglong(nn.Module):
         return output_surface, output_upper_air  # 只取前2层surface
 
     
-model = Canglong().cuda()
-input_upper_air = torch.randn(1, 7, 5, 2, 721, 1440).cuda()
-input_surface = torch.randn(1, 17, 2, 721, 1440).cuda()
-output_surface, output_upper_air = model(input_surface, input_upper_air)
-print(output_surface.shape)
-print(output_upper_air.shape)
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+import os
+from tqdm import tqdm
+import h5py as h5
+
+class WeatherDataset(Dataset):
+    def __init__(self, surface_data, upper_air_data, start_idx, end_idx):
+        """
+        初始化气象数据集 - 按时间序列顺序划分
+        
+        参数:
+            surface_data: 表面数据，形状为 [17, 100, 721, 1440]
+            upper_air_data: 高空数据，形状为 [7, 5, 100, 721, 1440]
+            start_idx: 开始索引
+            end_idx: 结束索引
+        """
+        self.surface_data = surface_data
+        self.upper_air_data = upper_air_data
+        self.length = end_idx - start_idx - 2  # 减2确保有足够的目标数据
+        
+        print(f"Dataset from index {start_idx} to {end_idx}, sample count: {self.length}")
+        
+    def __len__(self):
+        return self.length
+    
+    def __getitem__(self, idx):
+        # 提取输入数据 (t和t+1时刻)
+        input_surface = self.surface_data[idx:idx+2]  # [1, 17, 2, 721, 1440]
+        
+        # 提取高空数据 (t和t+1时刻)
+        input_upper_air = self.upper_air_data[idx:idx+2]  # [1, 7, 5, 2, 721, 1440]
+        
+        # 提取目标数据 (t+2时刻)
+        target_surface = self.surface_data[idx+2]  # [1, 16, 721, 1440]
+        target_upper_air = self.upper_air_data[idx+2]  # [1, 7, 4, 721, 1440]
+        
+        return input_surface, input_upper_air, target_surface, target_upper_air
+
+# 设置随机种子
+torch.manual_seed(42)
+np.random.seed(42)
+
+# 设置设备
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+# 加载数据
+print("Loading data...")
+input_surface, input_upper_air = h5.File('/gz-data/ERA5_2023_weekly.h5')['surface'], h5.File('/gz-data/ERA5_2023_weekly.h5')['upper_air']
+print(f"Surface data shape: {input_surface.shape}") #(52, 17, 721, 1440)
+print(f"Upper air data shape: {input_upper_air.shape}") #(52, 7, 5, 721, 1440)
+
+# 计算数据集划分点 - 按照6:2:2的时间序列划分
+total_samples = 52#input_surface.shape[0]  # 假设为100
+train_end = 30#int(total_samples * 0.6)  # 60
+valid_end = 40#int(total_samples * 0.8)  # 80
+
+# 创建数据集
+train_dataset = WeatherDataset(input_surface, input_upper_air, start_idx=0, end_idx=train_end)
+
+batch_size = 1  # 小batch size便于调试
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=2)  # 不打乱时间顺序
+
+print(f"Created data loaders with batch size {batch_size}")
+import sys
+sys.path.append('code_v2')
+from convert_dict_to_pytorch_arrays import load_normalization_arrays
+
+# 调用函数获取四个数组
+json = '/home/CanglongPhysics/code_v2/ERA5_1940_2019_combined_mean_std.json'
+surface_mean, surface_std, upper_mean, upper_std = load_normalization_arrays(json)
+
+
+for idx, (input_surface, input_upper_air, target_surface, target_upper_air) in enumerate(train_loader):
+    # 将数据移动到设备
+    input_surface = ((input_surface.permute(0, 2, 1, 3, 4) - surface_mean) / surface_std).to(device)
+    input_upper_air = ((input_upper_air.permute(0, 2, 3, 1, 4, 5) - upper_mean) / upper_std).to(device)
+    target_surface = target_surface.unsqueeze(2).to(device)
+    target_upper_air = target_upper_air.unsqueeze(3).to(device)
+    print(input_surface.shape, input_upper_air.shape, target_surface.shape, target_upper_air.shape)
+    # 清除梯度
+    # optimizer.zero_grad()
+
+    model = Canglong().cuda()
+    # 前向传播
+    output_surface, output_upper_air = model(input_surface, input_upper_air)
+    print(output_surface.shape)
+    print(output_upper_air.shape)
+    if idx == 0:
+        break

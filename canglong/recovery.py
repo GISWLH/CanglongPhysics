@@ -232,7 +232,6 @@ class RecoveryImage4D(nn.Module):
 
         # 获取重构后的图像尺寸
         _, feature, depth, time, height, width = x.shape
-        print(x.shape, 'xxx')
 
         # 计算各个维度需要裁剪的大小
         depth_padding = depth - self.image_size[1]
