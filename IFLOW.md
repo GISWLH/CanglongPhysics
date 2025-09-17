@@ -108,7 +108,87 @@ Epoch 2/50
   Train - Total: 276.625022, Surface: 275.985318, Upper Air: 0.639704
   Valid - Total: 260.641066, Surface: 260.051065, Upper Air: 0.590001
 
-    
+## 修订物理约束
+现在模型有三个版本，其中V1是基础版，V2带有风向约束，V3带有物理信息约束
+然而，现在的V3版本非常奇怪（train_v3.py和test_v3.py），需要你做出以下修改
+1. loss写到了main canglong里，这很奇怪，一般来说，损失函数单独在训练过程中定义即可，这里直接把损失函数的计算写到了主模型里，这不行，模型架构就是模型架构，训练损失是训练损失，主要是以下代码，要分离清楚        output_surface = self.decoder3d(output_surface)
+        output_upper_air = self.patchrecovery4d(output_upper_air.unsqueeze(3))
+        
+        # Calculate physical constraint losses if requested and physical constraints are initialized
+        if return_losses and self.physical_constraints is not None and target_surface is not None:
+            losses = {}
+            
+            # Calculate MSE losses
+            if target_surface is not None:
+                losses['mse_surface'] = F.mse_loss(output_surface, target_surface)
+            if target_upper_air is not None:
+                losses['mse_upper_air'] = F.mse_loss(output_upper_air, target_upper_air)
+            
+            # Calculate physical constraint losses
+            losses['water_balance'] = self.physical_constraints.water_balance_loss(surface, output_surface)
+            losses['energy_balance'] = self.physical_constraints.energy_balance_loss(output_surface)
+            losses['hydrostatic_balance'] = self.physical_constraints.hydrostatic_balance_loss(output_upper_air)
+            
+            # Calculate total loss
+            total_loss = losses.get('mse_surface', 0) + losses.get('mse_upper_air', 0)
+            total_loss += self.lambda_water * losses['water_balance']
+            total_loss += self.lambda_energy * losses['energy_balance']
+            total_loss += self.lambda_pressure * losses['hydrostatic_balance']
+            losses['total'] = total_loss
+            
+            return output_surface, output_upper_air, losses
+        
+        return output_surface, output_upper_air
+
+2. 标准化与反标准化十分奇怪，定义不一。已经说的很清楚了，用两行代码就能得到标准化与反标准化函数json = '/home/CanglongPhysics/code_v2/ERA5_1940_2019_combined_mean_std.json'
+surface_mean, surface_std, upper_mean, upper_std = load_normalization_arrays(json)
+>>> surface_mean.shape
+(1, 17, 1, 721, 1440)
+>>> upper_mean.shape
+(1, 7, 5, 1, 721, 1440)
+>>> 
+这样直接就不用变换维度，直接和输入矩阵的维度相同，广播计算
+    for input_surface, input_upper_air, target_surface, target_upper_air in train_pbar:
+        # 将数据移动到设备
+        input_surface = ((input_surface.permute(0, 2, 1, 3, 4) - surface_mean) / surface_std).to(device)
+        input_upper_air = ((input_upper_air.permute(0, 2, 3, 1, 4, 5) - upper_mean) / upper_std).to(device)
+        target_surface = ((target_surface.unsqueeze(2) - surface_mean) / surface_mean).to(device)
+        target_upper_air = ((target_upper_air.unsqueeze(3) - upper_mean) / upper_std).to(device)
+        
+        # 清除梯度
+        optimizer.zero_grad()
+        
+        # 前向传播
+        output_surface, output_upper_air = model(input_surface, input_upper_air)
+        
+        # 计算损失
+        loss_surface = criterion(output_surface, target_surface)
+        loss_upper_air = criterion(output_upper_air, target_upper_air)
+        loss = loss_surface + loss_upper_air
+        
+        # 反向传播和优化
+        loss.backward()
+        optimizer.step()
+但在train_v3.py和test_v3.py里，起码有三种不同的标准化与反标准化方式，都和我们不一样
+首先他自定义了load_normalization_arrays，多此一举，完全不需要这个，删除
+其次加载完又删除了维度，本来是对齐的这下不对齐了surface_mean_np = surface_mean_np.squeeze(0).squeeze(1)  # (17, 721, 1440)
+surface_std_np = surface_std_np.squeeze(0).squeeze(1)
+upper_mean_np = upper_mean_np.squeeze(0).squeeze(2)  # (7, 5, 721, 1440)
+upper_std_np = upper_std_np.squeeze(0).squeeze(2)
+最后传入CanglongV3的参数model = CanglongV3(
+    surface_mean=surface_mean,
+    surface_std=surface_std,
+    upper_mean=upper_mean,
+    upper_std=upper_std,
+    lambda_water=1e-11,      # 从0.01降到1e-11
+    lambda_energy=1e-12,     # 从0.001降到1e-12
+    lambda_pressure=1e-6     # 从0.0001降到1e-6
+)
+居然有这些mean,std，完全不需要，也不想传入物理损失约束，这和第一条一样，损失函数单独在训练过程中定义即可
+
+最后，请你严格按照model_v2的风格，正常定义Canglong()不传入任何参数，额外定义一个损失函数，训练时采用相同的标准化与反标准化。
+由于train_v3.py和test_v3.py共用前面的模型定义，你先改好一个，再根据另一个也调试好。
+
 ### Canglong模型结构
 1. **Patch嵌入**: 将2D/3D/4D数据转换为token
 2. **地球特定注意力**: 具有地球位置偏差的3D transformer块

@@ -73,6 +73,8 @@ CanglongPhysics 是一个专注于将物理信息添加到AI天气预测模型�
 ## 模型架构详情
 
 模型输入由三部分组成，高空层，表面层，和Earth constant层。
+    7个高空层，按顺序Geopotential, Vertical velocity, u component of wind, v component of wind, Fraction of cloud cover, Temperature, Specific humidity包括5个层级200, 300, 500, 700, 850 hpa
+    17个表面层，按顺序large_scale_rain_rate, convective_rain_rate, total_column_cloud_ice_water, total_cloud_cover, top_net_solar_radiation_clear_sky, 10m_u_component_of_wind, 10m_v_component_of_wind, 2m_dewpoint_temperature, 2m_temperature, mean_top_net_long_wave_radiation_flux, surface_latent_heat_flux, surface_sensible_heat_flux, surface_pressure, volumetric_soil_water_layer
     其中高空层(1, 7, 5, 2, 721, 1440)代表(batch, features, hpa, time, lat, lon) 经过patchembed4d(conv4D)后变为(1, 96, 3, 1, 181, 360)，其中96是更高维的特征
     其中表面层(1, 17, 2, 721, 1440)代表(batch, features, time, lat, lon) encoder3d(conv3D+resnet)后变为(1, 96, 2, 181, 360)，其中96是更高维的特征
     其中常值地球变量层(64, 721, 1440)代表(64个常值地球变量，如土地覆盖等, lat, lon)，经过conv3D变为(1, 96, 181, 360)
@@ -80,7 +82,113 @@ CanglongPhysics 是一个专注于将物理信息添加到AI天气预测模型�
     
     经过Swin-Transformer后，(1, 192, 6, 181, 360) after earthlayer, output_surface = output[:, :, 3:5, :, :]  #  四五层是surface，output_upper_air = output[:, :, :3, :, :]  # 前三层是upper air
     然后再把他们还原成原本的surface和upper air，这里surface还原(1, 17, 2, 721, 1440)，upper air仅仅还原torch.Size([1, 7, 5, 2, 721, 1440])
-    
+
+## 考虑物理信息约束
+考虑以下物理信息：
+* 水量平衡约束，用土壤水可以构造一个简单的水量平衡公式
+∆Soil 𝑤𝑎𝑡𝑒𝑟=𝑃_𝑡𝑜𝑡𝑎𝑙−𝐸−𝑅+𝜀，其中soil water是volumetric_soil_water_layer，P是large_scale_rain_rate和convective_rain_rate之和，E可以用surface_latent_heat_flux，R暂时忽略
+* 能量平衡约束，反映了海表通过辐射与热通量之间的基本能量平衡
+σSST^4=LHF+SHF+tsrc，其中tsrc代表总的向下能量通量，即 tsrc = SW_net + LW_↓。σSST⁴, LHF, SHF 分别代表向上长波辐射、潜热和感热这三项能量损失。其中tsrc可用top_net_solar_radiation_clear_sky替代？
+* 表面气压平衡约束，在大气静力平衡近似下，表面气压 sp 与海平面气压 msl 之间可利用高度修正关系进行连接
+Msl=sp×exp⁡(𝑔𝑍/(𝑅_𝑑 𝑡2𝑚))
+关键是如何在损失函数中体现这一点，目前的模型，仅仅用MSE Loss
+```
+# 前向传播
+output_surface, output_upper_air = model(input_surface, input_upper_air)
+        
+# 计算损失
+loss_surface = criterion(output_surface, target_surface)
+loss_upper_air = criterion(output_upper_air, target_upper_air)
+loss = loss_surface + loss_upper_air
+```
+Epoch 1/50
+  Train - Total: 344.196945, Surface: 343.137526, Upper Air: 1.059414
+  Valid - Total: 316.260998, Surface: 315.471027, Upper Air: 0.789969
+Epoch 2/50
+  Train - Total: 276.625022, Surface: 275.985318, Upper Air: 0.639704
+  Valid - Total: 260.641066, Surface: 260.051065, Upper Air: 0.590001
+
+## 修订物理约束
+现在模型有三个版本，其中V1是基础版，V2带有风向约束，V3带有物理信息约束
+然而，现在的V3版本非常奇怪（train_v3.py和test_v3.py），需要你做出以下修改
+1. loss写到了main canglong里，这很奇怪，一般来说，损失函数单独在训练过程中定义即可，这里直接把损失函数的计算写到了主模型里，这不行，模型架构就是模型架构，训练损失是训练损失，主要是以下代码，要分离清楚        output_surface = self.decoder3d(output_surface)
+        output_upper_air = self.patchrecovery4d(output_upper_air.unsqueeze(3))
+        
+        # Calculate physical constraint losses if requested and physical constraints are initialized
+        if return_losses and self.physical_constraints is not None and target_surface is not None:
+            losses = {}
+            
+            # Calculate MSE losses
+            if target_surface is not None:
+                losses['mse_surface'] = F.mse_loss(output_surface, target_surface)
+            if target_upper_air is not None:
+                losses['mse_upper_air'] = F.mse_loss(output_upper_air, target_upper_air)
+            
+            # Calculate physical constraint losses
+            losses['water_balance'] = self.physical_constraints.water_balance_loss(surface, output_surface)
+            losses['energy_balance'] = self.physical_constraints.energy_balance_loss(output_surface)
+            losses['hydrostatic_balance'] = self.physical_constraints.hydrostatic_balance_loss(output_upper_air)
+            
+            # Calculate total loss
+            total_loss = losses.get('mse_surface', 0) + losses.get('mse_upper_air', 0)
+            total_loss += self.lambda_water * losses['water_balance']
+            total_loss += self.lambda_energy * losses['energy_balance']
+            total_loss += self.lambda_pressure * losses['hydrostatic_balance']
+            losses['total'] = total_loss
+            
+            return output_surface, output_upper_air, losses
+        
+        return output_surface, output_upper_air
+
+2. 标准化与反标准化十分奇怪，定义不一。已经说的很清楚了，用两行代码就能得到标准化与反标准化函数json = '/home/CanglongPhysics/code_v2/ERA5_1940_2019_combined_mean_std.json'
+surface_mean, surface_std, upper_mean, upper_std = load_normalization_arrays(json)
+>>> surface_mean.shape
+(1, 17, 1, 721, 1440)
+>>> upper_mean.shape
+(1, 7, 5, 1, 721, 1440)
+>>> 
+这样直接就不用变换维度，直接和输入矩阵的维度相同，广播计算
+    for input_surface, input_upper_air, target_surface, target_upper_air in train_pbar:
+        # 将数据移动到设备
+        input_surface = ((input_surface.permute(0, 2, 1, 3, 4) - surface_mean) / surface_std).to(device)
+        input_upper_air = ((input_upper_air.permute(0, 2, 3, 1, 4, 5) - upper_mean) / upper_std).to(device)
+        target_surface = ((target_surface.unsqueeze(2) - surface_mean) / surface_mean).to(device)
+        target_upper_air = ((target_upper_air.unsqueeze(3) - upper_mean) / upper_std).to(device)
+        
+        # 清除梯度
+        optimizer.zero_grad()
+        
+        # 前向传播
+        output_surface, output_upper_air = model(input_surface, input_upper_air)
+        
+        # 计算损失
+        loss_surface = criterion(output_surface, target_surface)
+        loss_upper_air = criterion(output_upper_air, target_upper_air)
+        loss = loss_surface + loss_upper_air
+        
+        # 反向传播和优化
+        loss.backward()
+        optimizer.step()
+但在train_v3.py和test_v3.py里，起码有三种不同的标准化与反标准化方式，都和我们不一样
+首先他自定义了load_normalization_arrays，多此一举，完全不需要这个，删除
+其次加载完又删除了维度，本来是对齐的这下不对齐了surface_mean_np = surface_mean_np.squeeze(0).squeeze(1)  # (17, 721, 1440)
+surface_std_np = surface_std_np.squeeze(0).squeeze(1)
+upper_mean_np = upper_mean_np.squeeze(0).squeeze(2)  # (7, 5, 721, 1440)
+upper_std_np = upper_std_np.squeeze(0).squeeze(2)
+最后传入CanglongV3的参数model = CanglongV3(
+    surface_mean=surface_mean,
+    surface_std=surface_std,
+    upper_mean=upper_mean,
+    upper_std=upper_std,
+    lambda_water=1e-11,      # 从0.01降到1e-11
+    lambda_energy=1e-12,     # 从0.001降到1e-12
+    lambda_pressure=1e-6     # 从0.0001降到1e-6
+)
+居然有这些mean,std，完全不需要，也不想传入物理损失约束，这和第一条一样，损失函数单独在训练过程中定义即可
+
+最后，请你严格按照model_v2的风格，正常定义Canglong()不传入任何参数，额外定义一个损失函数，训练时采用相同的标准化与反标准化。
+由于train_v3.py和test_v3.py共用前面的模型定义，你先改好一个，再根据另一个也调试好。
+
 ### Canglong模型结构
 1. **Patch嵌入**: 将2D/3D/4D数据转换为token
 2. **地球特定注意力**: 具有地球位置偏差的3D transformer块
@@ -355,6 +463,58 @@ ECMWF是1.5°分辨率，CAS-Canglong是0.25°，下载好的观测是0.25°全�
    
 3. 传统的Swin-Transformer通过固定交换窗口信息，这里我想在AI模型中根据天气的信息添加风向的窗口交换。即根据u/v进行求算主导风向，根据风向交换一次窗口信息。我思考的一种方式是，先在upper_air(1, 7, 5, 2, 721, 1440)的3，4层是uv，提取出来upper_air(1, 2:4, 5, 2, 721, 1440)是多层u,v；然后和在surface(1, 17, 2, 721, 1440)的5, 6层是10m uv，提取出来 surface(1, 4:6, 2, 721, 1440)是10m uv。由于在编码器中这些特征马上就变为了高维度变量(1, 96, 181, 360)，失去了物理意义。建议在encoder之前先计算出粗略的风向，在181，360的4✖️4下采样计算主导风向，记录下这些信息。之后在swin-transformer块尽可能根据记录的风向信息，进行窗口物理变化。你头脑风暴下提供一些能实现这个的方案。建议类似的方案如预先离线生成 9 份注意力掩码（1 份不移位 + 8 份按 N、NE … 等方向移位）。前向时根据每个窗口中心像素的风向 id 选择对应的掩码。能实现代码侵入性最低；且掩码与特征解耦，不破坏已有 CUDA kernel；
 
+4. 添加物理约束，采用上文提到的三个方程。核心思想是将物理方程的**残差（residual）作为一个软约束（soft constraint）**添加到总的损失函数中。如果模型的预测结果完美符合物理定律，那么这个物理方程的残差就为零，不会产生额外的损失。如果预测结果违反了物理定律，残差就会变大，从而产生一个惩罚项，引导模型参数向着更符合物理规律的方向更新。
+总的损失函数将变为：
+L_total=L_MSE+λ_waterL_water+λ_energyL_energy+λ_pressureL_pressure
+其中 L_MSE 是使用的 loss_surface + loss_upper_air。L_water, L_energy, L_pressure 是新增的物理损失项。λ 是一系列超参数，用于平衡各项损失的权重。这个方案直接将物理方程的残差的L1或L2范数（即MAE或MSE）作为损失项。但需要注意，由于所有的输入都被标准化了，因此要先反标准化才有物理意义。
+原始方程 ∆Soil water = P_total − E 中，左侧的 ∆Soil water (土壤水变化量) 需要两个时间点（t1 和 t0）的土壤水含量才能计算 (Soil_water_t1 - Soil_water_t0)。现在模型只输出一个时间点 t1 的状态。
+解决方案: 利用模型的输入作为初始状态 t0，土壤水变化量 (∆S):delta_soil_water = output_surface_physical[:, 13, :, :] - input_surface_physical[:, 13, :, :]
+总降水 (P): 降水率是模型在预测时间步内的平均速率，因此直接使用输出值。
+large_scale_rain = output_surface_physical[:, 0, :, :] 单位kg m**-2 s**-1
+convective_rain = output_surface_physical[:, 1, :, :] 单位kg m**-2 s**-1
+p_total = (large_scale_rain + convective_rain) * delta_t
+(这里的 delta_t 是预测的时间步长，单位是秒。例如，如果模型预测6小时后的状态，delta_t = 6 * 3600。你需要将降水率乘以时间，这里是一周，得到总降水量。)
+蒸发 (E): 同样，潜热通量也需要乘以时间步长。
+latent_heat_flux = output_surface_physical[:, 10, :, :] 单位J m**-2
+evaporation = latent_heat_flux / (2.5e6) * delta_t
+计算水量残差:
+residual_water = delta_soil_water - (p_total - evaporation)
+loss_water = MSE(residual_water, 0)
+
+能量平衡约束
+具体写法:
+所有变量都来自反标准化后的模型输出 output_surface_physical。
+计算各项:
+sw_net = output_surface_physical[:, 4, :, :] (净太阳短波辐射) 单位J m**-2
+lw_net = output_surface_physical[:, 9, :, :] (净长波辐射，通常向上为正，代表能量损失) 单位W m**-2
+shf = output_surface_physical[:, 11, :, :] (感热通量，向上为正) 单位J m**-2
+lhf = output_surface_physical[:, 10, :, :] (潜热通量，向上为正) 单位J m**-2
+计算能量残差:
+地表吸收的总能量是 sw_net - lw_net (向下为正)。
+地表释放的总能量是 shf + lhf。
+注意: 您必须根据您使用的数据集（如ERA5）的通量符号约定来确定正确的公式。一个常见的约定是：
+residual_energy = (sw_net - lw_net) - (shf + lhf)
+loss_energy = MSE(residual_energy, 0)
+
+静力平衡约束 (完全不变)
+静力平衡描述的是在同一时刻，垂直方向上重力和气压梯度力的平衡。它完全不涉及时间变化，因此写法和多时间步时完全一样。
+具体写法:
+所有变量都来自反标准化后的高空输出 output_upper_air_physical。
+选取相邻两层计算 (以850hPa和700hPa为例):
+phi_850 = output_upper_air_physical[:, 0, 4, :, :] 单位m**2 s**-2
+phi_700 = output_upper_air_physical[:, 0, 3, :, :] 单位m**2 s**-2
+temp_850 = output_upper_air_physical[:, 5, 4, :, :] 单位K
+temp_700 = output_upper_air_physical[:, 5, 3, :, :] 单位K
+
+计算模型预测的位势厚度和物理公式计算的位势厚度:
+delta_phi_model = phi_700 - phi_850
+temp_avg = (temp_700 + temp_850) / 2
+delta_phi_physical = 287 * temp_avg * (log(850) - log(700))
+(其中 287 是干空气气体常数 Rd)
+
+计算静力平衡残差:
+residual_hydrostatic = delta_phi_model - delta_phi_physical
+loss_pressure = MSE(residual_hydrostatic, 0)
 #### 计算RMSE\ACC\SPEI的同号率
 
 分为CAS-Canglong和ECMWF的比较
