@@ -1,1 +1,5 @@
 constant_masks/*.pt
+# Ignore checkpoints
+checkpoints/
+checkpoints_v3/
+code_v2/checkpoints_v3/
