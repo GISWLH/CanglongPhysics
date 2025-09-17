@@ -189,6 +189,11 @@ upper_std_np = upper_std_np.squeeze(0).squeeze(2)
 最后，请你严格按照model_v2的风格，正常定义Canglong()不传入任何参数，额外定义一个损失函数，训练时采用相同的标准化与反标准化。
 由于train_v3.py和test_v3.py共用前面的模型定义，你先改好一个，再根据另一个也调试好。
 
+## 利用损失函数增强预报能力
+这里我们给予一些变量额外的权重，以增强预测能力，S2S重点是MJO，因此侧重OLR (avg_tnlwrf) ，850hPa和200hPa纬向风（u风分量），还侧重降水和t2m，d2m
+降水是0,1之和，d2m是7，t2m是8，avg_tnlwrf是9
+850和200的u在torch.Size([1, 7, 5, 2, 721, 1440])中分别是[0, 2, 0 & 4, :, :, :]
+
 ### Canglong模型结构
 1. **Patch嵌入**: 将2D/3D/4D数据转换为token
 2. **地球特定注意力**: 具有地球位置偏差的3D transformer块

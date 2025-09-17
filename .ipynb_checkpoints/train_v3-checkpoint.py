@@ -1,16 +1,17 @@
+import os
+import sys
+
+import numpy as np
 import torch
 from torch import nn
-import numpy as np
-from timm.layers import trunc_normal_, DropPath
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-import os
-import json
+from timm.layers import trunc_normal_, DropPath
 from tqdm import tqdm
 import h5py as h5
-import sys
-import os
+
+sys.path.append('code_v2')
+from convert_dict_to_pytorch_arrays import load_normalization_arrays
 
 from canglong.earth_position import calculate_position_bias_indices
 from canglong.shift_window import create_shifted_window_mask, partition_windows, reverse_partition
@@ -23,160 +24,8 @@ from canglong.wind_aware_mask import WindAwareAttentionMaskGenerator
 from canglong.wind_aware_block import WindAwareEarthSpecificBlock
 from canglong.helper import ResidualBlock, NonLocalBlock, DownSampleBlock, UpSampleBlock, GroupNorm, Swish
 
-# 使用绝对路径加载constant_masks
-import os
 
-
-input_constant = torch.load('constant_masks/Earth.pt', weights_only=False).cuda()
-
-
-class PhysicalConstraints(nn.Module):
-    """
-    Physical constraints module for weather prediction model.
-    Implements water balance, energy balance, and hydrostatic balance constraints.
-    """
-    
-    def __init__(self, surface_mean, surface_std, upper_mean, upper_std, delta_t=7*24*3600):
-        """
-        Args:
-            surface_mean: Mean values for surface variables (17, 721, 1440)
-            surface_std: Std values for surface variables (17, 721, 1440)
-            upper_mean: Mean values for upper air variables (7, 5, 721, 1440)
-            upper_std: Std values for upper air variables (7, 5, 721, 1440)
-            delta_t: Time step in seconds (default: 1 week = 7*24*3600 seconds)
-        """
-        super().__init__()
-        self.register_buffer('surface_mean', surface_mean)
-        self.register_buffer('surface_std', surface_std)
-        self.register_buffer('upper_mean', upper_mean)
-        self.register_buffer('upper_std', upper_std)
-        self.delta_t = delta_t
-        
-        # Physical constants
-        self.L_v = 2.5e6  # Latent heat of vaporization (J/kg)
-        self.R_d = 287    # Gas constant for dry air (J/(kg·K))
-        self.g = 9.81     # Gravitational acceleration (m/s²)
-    
-    def denormalize_surface(self, normalized_data):
-        """Denormalize surface data to physical units"""
-        # Ensure surface_std and surface_mean are properly broadcasted
-        # normalized_data shape: (B, 17, time, lat, lon)
-        # surface_std/mean shape: (17, lat, lon) -> need to add batch and time dims
-        surface_std = self.surface_std.unsqueeze(0).unsqueeze(2)  # (1, 17, 1, lat, lon)
-        surface_mean = self.surface_mean.unsqueeze(0).unsqueeze(2)  # (1, 17, 1, lat, lon)
-        return normalized_data * surface_std + surface_mean
-    
-    def denormalize_upper(self, normalized_data):
-        """Denormalize upper air data to physical units"""
-        # Ensure upper_std and upper_mean are properly broadcasted
-        # normalized_data shape: (B, 7, levels, time, lat, lon)
-        # upper_std/mean shape: (7, levels, lat, lon) -> need to add batch and time dims
-        upper_std = self.upper_std.unsqueeze(0).unsqueeze(3)  # (1, 7, levels, 1, lat, lon)
-        upper_mean = self.upper_mean.unsqueeze(0).unsqueeze(3)  # (1, 7, levels, 1, lat, lon)
-        return normalized_data * upper_std + upper_mean
-    
-    def water_balance_loss(self, input_surface, output_surface):
-        """
-        Calculate water balance constraint loss.
-        Water balance: ΔSoil_water = P_total - E
-        
-        Args:
-            input_surface: Input surface variables (B, 17, time, lat, lon)
-            output_surface: Output surface variables (B, 17, time, lat, lon)
-        """
-        # Denormalize to physical units
-        input_physical = self.denormalize_surface(input_surface)
-        output_physical = self.denormalize_surface(output_surface)
-        
-        # Extract relevant variables (assuming single time output)
-        # Variable indices based on CLAUDE.md:
-        # 0: large_scale_rain_rate, 1: convective_rain_rate
-        # 10: surface_latent_heat_flux
-        # 13: volumetric_soil_water_layer
-        
-        # Soil water change (index 13)
-        delta_soil_water = output_physical[:, 13, 0, :, :] - input_physical[:, 13, -1, :, :]
-        
-        # Total precipitation (indices 0 and 1) - convert from kg m^-2 s^-1 to total amount
-        large_scale_rain = output_physical[:, 0, 0, :, :]
-        convective_rain = output_physical[:, 1, 0, :, :]
-        p_total = (large_scale_rain + convective_rain) * self.delta_t
-        
-        # Evaporation from latent heat flux (index 10) - convert J m^-2 to water amount
-        latent_heat_flux = output_physical[:, 10, 0, :, :]
-        evaporation = latent_heat_flux / self.L_v * self.delta_t
-        
-        # Water balance residual
-        residual_water = delta_soil_water - (p_total - evaporation)
-        
-        # Return MSE loss
-        return F.mse_loss(residual_water, torch.zeros_like(residual_water))
-    
-    def energy_balance_loss(self, output_surface):
-        """
-        Calculate energy balance constraint loss.
-        Energy balance: SW_net - LW_net = SHF + LHF
-        
-        Args:
-            output_surface: Output surface variables (B, 17, time, lat, lon)
-        """
-        # Denormalize to physical units
-        output_physical = self.denormalize_surface(output_surface)
-        
-        # Extract relevant variables (assuming single time output)
-        # Variable indices based on CLAUDE.md:
-        # 4: top_net_solar_radiation_clear_sky (SW_net)
-        # 9: mean_top_net_long_wave_radiation_flux (LW_net)
-        # 10: surface_latent_heat_flux (LHF)
-        # 11: surface_sensible_heat_flux (SHF)
-        
-        sw_net = output_physical[:, 4, 0, :, :]  # Net solar radiation (J m^-2)
-        lw_net = output_physical[:, 9, 0, :, :]  # Net longwave radiation (W m^-2)
-        shf = output_physical[:, 11, 0, :, :]    # Sensible heat flux (J m^-2)
-        lhf = output_physical[:, 10, 0, :, :]    # Latent heat flux (J m^-2)
-        
-        # Energy balance residual
-        # Net absorbed energy - Net released energy
-        residual_energy = (sw_net - lw_net) - (shf + lhf)
-        
-        # Return MSE loss
-        return F.mse_loss(residual_energy, torch.zeros_like(residual_energy))
-    
-    def hydrostatic_balance_loss(self, output_upper_air):
-        """
-        Calculate hydrostatic balance constraint loss.
-        Hydrostatic balance: Δφ = R_d * T_avg * ln(p1/p2)
-        
-        Args:
-            output_upper_air: Output upper air variables (B, 7, levels, time, lat, lon)
-        """
-        # Denormalize to physical units
-        output_physical = self.denormalize_upper(output_upper_air)
-        
-        # Extract relevant variables (assuming single time output)
-        # Variable indices based on CLAUDE.md:
-        # 0: Geopotential (φ)
-        # 5: Temperature (T)
-        # Pressure levels: 200, 300, 500, 700, 850 hPa (indices 0-4)
-        
-        # Calculate between 850 hPa (index 4) and 700 hPa (index 3)
-        phi_850 = output_physical[:, 0, 4, 0, :, :]  # Geopotential at 850 hPa (m^2 s^-2)
-        phi_700 = output_physical[:, 0, 3, 0, :, :]  # Geopotential at 700 hPa
-        temp_850 = output_physical[:, 5, 4, 0, :, :] # Temperature at 850 hPa (K)
-        temp_700 = output_physical[:, 5, 3, 0, :, :] # Temperature at 700 hPa
-        
-        # Model-predicted geopotential thickness
-        delta_phi_model = phi_700 - phi_850
-        
-        # Physically-calculated geopotential thickness
-        temp_avg = (temp_700 + temp_850) / 2
-        delta_phi_physical = self.R_d * temp_avg * torch.log(torch.tensor(850.0/700.0, device=temp_avg.device))
-        
-        # Hydrostatic balance residual
-        residual_hydrostatic = delta_phi_model - delta_phi_physical
-        
-        # Return MSE loss
-        return F.mse_loss(residual_hydrostatic, torch.zeros_like(residual_hydrostatic))
+input_constant = None
 
 
 class UpSample(nn.Module):
@@ -458,16 +307,9 @@ class CanglongV3(nn.Module):
     Version 3 with physical constraints (water balance, energy balance, hydrostatic balance)
     """
 
-    def __init__(self, embed_dim=96, num_heads=(8, 16, 16, 8), window_size=(2, 6, 12),
-                 surface_mean=None, surface_std=None, upper_mean=None, upper_std=None,
-                 lambda_water=1e-11, lambda_energy=1e-12, lambda_pressure=1e-6):
+    def __init__(self, embed_dim=96, num_heads=(8, 16, 16, 8), window_size=(2, 6, 12)):
         super().__init__()
         drop_path = np.linspace(0, 0.2, 8).tolist()
-        
-        # Physical constraint weights
-        self.lambda_water = lambda_water
-        self.lambda_energy = lambda_energy
-        self.lambda_pressure = lambda_pressure
         
         # 风向处理器
         self.wind_direction_processor = WindDirectionProcessor(window_size=(4, 4))
@@ -545,18 +387,8 @@ class CanglongV3(nn.Module):
 
         self.conv_constant = nn.Conv2d(in_channels=64, out_channels=96, kernel_size=5, stride=4, padding=2)
         self.input_constant = input_constant
-        
-        # Initialize physical constraints module
-        if surface_mean is not None and surface_std is not None and upper_mean is not None and upper_std is not None:
-            self.physical_constraints = PhysicalConstraints(
-                surface_mean, surface_std, upper_mean, upper_std
-            )
-        else:
-            self.physical_constraints = None
-            print("Warning: Physical constraints not initialized. Normalization parameters not provided.")
 
-
-    def forward(self, surface, upper_air, target_surface=None, target_upper_air=None, return_losses=False):        
+    def forward(self, surface, upper_air):        
         
         # 计算风向ID
         wind_direction_id = self.wind_direction_processor(surface, upper_air)
@@ -595,32 +427,18 @@ class CanglongV3(nn.Module):
 
         output_surface = self.decoder3d(output_surface)
         output_upper_air = self.patchrecovery4d(output_upper_air.unsqueeze(3))
-        
-        # Calculate physical constraint losses if requested and physical constraints are initialized
-        if return_losses and self.physical_constraints is not None and target_surface is not None:
-            losses = {}
-            
-            # Calculate MSE losses
-            if target_surface is not None:
-                losses['mse_surface'] = F.mse_loss(output_surface, target_surface)
-            if target_upper_air is not None:
-                losses['mse_upper_air'] = F.mse_loss(output_upper_air, target_upper_air)
-            
-            # Calculate physical constraint losses
-            losses['water_balance'] = self.physical_constraints.water_balance_loss(surface, output_surface)
-            losses['energy_balance'] = self.physical_constraints.energy_balance_loss(output_surface)
-            losses['hydrostatic_balance'] = self.physical_constraints.hydrostatic_balance_loss(output_upper_air)
-            
-            # Calculate total loss
-            total_loss = losses.get('mse_surface', 0) + losses.get('mse_upper_air', 0)
-            total_loss += self.lambda_water * losses['water_balance']
-            total_loss += self.lambda_energy * losses['energy_balance']
-            total_loss += self.lambda_pressure * losses['hydrostatic_balance']
-            losses['total'] = total_loss
-            
-            return output_surface, output_upper_air, losses
-        
+
         return output_surface, output_upper_air
+
+
+def denormalize_surface(tensor, surface_mean, surface_std):
+    """Convert normalized surface data back to physical units."""
+    return tensor * surface_std + surface_mean
+
+
+def denormalize_upper(tensor, upper_mean, upper_std):
+    """Convert normalized upper-air data back to physical units."""
+    return tensor * upper_std + upper_mean
 
 
 def calculate_water_balance_loss(input_surface_normalized, output_surface_normalized, 
@@ -636,12 +454,8 @@ def calculate_water_balance_loss(input_surface_normalized, output_surface_normal
         surface_std: 表面变量标准差 (17, lat, lon)
         delta_t: 时间步长（秒）
     """
-    # 反标准化到物理单位
-    surface_mean = surface_mean.unsqueeze(0).unsqueeze(2)  # (1, 17, 1, lat, lon)
-    surface_std = surface_std.unsqueeze(0).unsqueeze(2)    # (1, 17, 1, lat, lon)
-    
-    input_physical = input_surface_normalized * surface_std + surface_mean
-    output_physical = output_surface_normalized * surface_std + surface_mean
+    input_physical = denormalize_surface(input_surface_normalized, surface_mean, surface_std)
+    output_physical = denormalize_surface(output_surface_normalized, surface_mean, surface_std)
     
     # 变量索引（基于CLAUDE.md）:
     # 0: large_scale_rain_rate, 1: convective_rain_rate
@@ -677,10 +491,7 @@ def calculate_energy_balance_loss(output_surface_normalized, surface_mean, surfa
         surface_mean: 表面变量均值 (17, lat, lon)
         surface_std: 表面变量标准差 (17, lat, lon)
     """
-    # 反标准化到物理单位
-    surface_mean = surface_mean.unsqueeze(0).unsqueeze(2)  # (1, 17, 1, lat, lon)
-    surface_std = surface_std.unsqueeze(0).unsqueeze(2)    # (1, 17, 1, lat, lon)
-    output_physical = output_surface_normalized * surface_std + surface_mean
+    output_physical = denormalize_surface(output_surface_normalized, surface_mean, surface_std)
     
     # 变量索引（基于CLAUDE.md）:
     # 4: top_net_solar_radiation_clear_sky (SW_net)
@@ -709,10 +520,7 @@ def calculate_hydrostatic_balance_loss(output_upper_normalized, upper_mean, uppe
         upper_mean: 高空变量均值 (7, levels, lat, lon)
         upper_std: 高空变量标准差 (7, levels, lat, lon)
     """
-    # 反标准化到物理单位
-    upper_mean = upper_mean.unsqueeze(0).unsqueeze(3)  # (1, 7, levels, 1, lat, lon)
-    upper_std = upper_std.unsqueeze(0).unsqueeze(3)    # (1, 7, levels, 1, lat, lon)
-    output_physical = output_upper_normalized * upper_std + upper_mean
+    output_physical = denormalize_upper(output_upper_normalized, upper_mean, upper_std)
     
     # 变量索引（基于CLAUDE.md）:
     # 0: Geopotential (φ)
@@ -739,120 +547,23 @@ def calculate_hydrostatic_balance_loss(output_upper_normalized, upper_mean, uppe
     return torch.nn.functional.mse_loss(residual_hydrostatic, torch.zeros_like(residual_hydrostatic))
 
 
-def load_normalization_arrays(json_path, verbose=False):
-    """
-    从JSON文件加载标准化参数数组
-    
-    Args:
-        json_path: JSON文件路径
-        verbose: 是否打印详细信息，默认False（静默加载）
-    
-    Returns:
-        [surface_mean, surface_std, upper_mean, upper_std]: 四个numpy数组
-        - surface_mean: (17, 721, 1440)
-        - surface_std: (17, 721, 1440) 
-        - upper_mean: (7, 5, 721, 1440)
-        - upper_std: (7, 5, 721, 1440)
-    """
-    # 变量定义 - 必须与模型通道顺序严格对应
-    surf_vars = ['lsrr','crr','tciw','tcc','tsrc','u10','v10','d2m',
-                 't2m','avg_tnlwrf','slhf','sshf','sp','swvl','msl','siconc','sst']
-    upper_vars = ['z','w','u','v','cc','t','q']
-    levels = [200, 300, 500, 700, 850]
-    
-    def load_statistics_from_json(json_path, verbose=True):
-        """加载JSON格式的统计数据"""
+def calculate_focus_variable_loss(output_surface_norm, target_surface_norm,
+                                  output_upper_norm, target_upper_norm):
+    """Repeat key-variable MSE so their weight doubles in the total loss."""
+    precip_pred = output_surface_norm[:, 0, ...] + output_surface_norm[:, 1, ...]
+    precip_target = target_surface_norm[:, 0, ...] + target_surface_norm[:, 1, ...]
+    precip_loss = torch.nn.functional.mse_loss(precip_pred, precip_target)
 
-        with open(json_path, 'r') as f:
-            stats_data = json.load(f)
-        
-        if verbose:
-            print("JSON数据加载成功")
-            print(f"Surface变量数: {len(stats_data['surface'])}")
-            print(f"Upper air变量数: {len(stats_data['upper_air'])}")
-        return stats_data
+    surface_focus_indices = [7, 8, 9]
+    surface_focus_pred = output_surface_norm[:, surface_focus_indices, ...]
+    surface_focus_target = target_surface_norm[:, surface_focus_indices, ...]
+    surface_focus_loss = torch.nn.functional.mse_loss(surface_focus_pred, surface_focus_target)
 
-    def create_surface_arrays(surface_data, verbose=True):
-        """创建Surface变量的mean/std数组
-        
-        返回:
-            surface_mean: (17, 721, 1440)
-            surface_std: (17, 721, 1440)
-        """
-        
-        if verbose:
-            print("创建Surface数组...")
-        
-        # 初始化数组
-        surface_mean = np.zeros((17, 721, 1440), dtype=np.float32)
-        surface_std = np.ones((17, 721, 1440), dtype=np.float32)  # 默认std为1，避免除零
-        
-        # 按固定顺序填充数据
-        for i, var_name in enumerate(surf_vars):
+    upper_u_pred = output_upper_norm[:, 2, [0, 4], ...]
+    upper_u_target = target_upper_norm[:, 2, [0, 4], ...]
+    upper_focus_loss = torch.nn.functional.mse_loss(upper_u_pred, upper_u_target)
 
-            mean_val = surface_data[var_name]['mean']
-            std_val = surface_data[var_name]['std']
-            
-            # 广播到所有空间位置
-            surface_mean[i, :, :] = mean_val
-            surface_std[i, :, :] = max(std_val, 1e-8)  # 避免std为0
-            
-            if verbose:
-                print(f"  {i:2d}. {var_name:15s}: mean={mean_val:12.8f}, std={std_val:12.8f}")
-
-        
-        if verbose:
-            print(f"Surface数组创建完成: {surface_mean.shape}")
-        return surface_mean[None, :, None, :, :], surface_std[None, :, None, :, :]
-
-    def create_upper_air_arrays(upper_air_data, verbose=True):
-        """创建Upper air变量的mean/std数组
-        
-        返回:
-            upper_air_mean: (7, 5, 721, 1440)
-            upper_air_std: (7, 5, 721, 1440)
-        """
-        
-        if verbose:
-            print("创建Upper air数组...")
-        
-        # 初始化数组
-        upper_air_mean = np.zeros((7, 5, 721, 1440), dtype=np.float32)
-        upper_air_std = np.ones((7, 5, 721, 1440), dtype=np.float32)  # 默认std为1
-        
-        # 按固定顺序填充数据
-        for i, var_name in enumerate(upper_vars):
-            if verbose:
-                print(f"  处理变量 {i}. {var_name}")
-            for j, level in enumerate(levels):
-                level_str = str(level)
-                mean_val = upper_air_data[var_name][level_str]['mean']
-                std_val = upper_air_data[var_name][level_str]['std']
-                
-                # 广播到所有空间位置
-                upper_air_mean[i, j, :, :] = mean_val
-                upper_air_std[i, j, :, :] = max(std_val, 1e-8)  # 避免std为0
-                
-                if verbose:
-                    print(f"    {level:3d}hPa: mean={mean_val:12.6f}, std={std_val:12.6f}")
-
-        return upper_air_mean[None, :, :, None, :, :], upper_air_std[None, :, :, None, :, :]
-    
-    try:
-        # 1. 加载JSON数据
-        stats_data = load_statistics_from_json(json_path, verbose=verbose)
-        
-        # 2. 创建Surface数组
-        surface_mean, surface_std = create_surface_arrays(stats_data['surface'], verbose=verbose)
-        
-        # 3. 创建Upper air数组
-        upper_mean, upper_std = create_upper_air_arrays(stats_data['upper_air'], verbose=verbose)
-        
-        return [surface_mean, surface_std, upper_mean, upper_std]
-        
-    except Exception as e:
-        print(f"加载标准化数组时出错: {str(e)}")
-        raise e
+    return precip_loss + surface_focus_loss + upper_focus_loss
 
 
 class WeatherDataset(Dataset):
@@ -908,6 +619,11 @@ np.random.seed(42)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
+# Load constant masks on the selected device
+constant_path = 'constant_masks/Earth.pt'
+input_constant = torch.load(constant_path, map_location=device)
+input_constant = input_constant.to(device)
+
 # 加载数据
 print("Loading data...")
 h5_file = h5.File('/gz-data/ERA5_2023_weekly.h5', 'r')
@@ -923,16 +639,11 @@ print("Loading normalization parameters...")
 json_path = '/home/CanglongPhysics/code_v2/ERA5_1940_2019_combined_mean_std.json'
 surface_mean_np, surface_std_np, upper_mean_np, upper_std_np = load_normalization_arrays(json_path)
 
-# 移除额外维度并转换为张量
-surface_mean_np = surface_mean_np.squeeze(0).squeeze(1)  # (17, 721, 1440)
-surface_std_np = surface_std_np.squeeze(0).squeeze(1)
-upper_mean_np = upper_mean_np.squeeze(0).squeeze(2)  # (7, 5, 721, 1440)
-upper_std_np = upper_std_np.squeeze(0).squeeze(2)
-
-surface_mean = torch.tensor(surface_mean_np.astype("float32")).to(device)
-surface_std = torch.tensor(surface_std_np.astype("float32")).to(device)
-upper_mean = torch.tensor(upper_mean_np.astype("float32")).to(device)
-upper_std = torch.tensor(upper_std_np.astype("float32")).to(device)
+# 转换为张量并移动到设备
+surface_mean = torch.from_numpy(surface_mean_np).to(device=device, dtype=torch.float32)
+surface_std = torch.from_numpy(surface_std_np).to(device=device, dtype=torch.float32)
+upper_mean = torch.from_numpy(upper_mean_np).to(device=device, dtype=torch.float32)
+upper_std = torch.from_numpy(upper_std_np).to(device=device, dtype=torch.float32)
 
 print(f"Surface mean shape: {surface_mean.shape}")
 print(f"Surface std shape: {surface_std.shape}")
@@ -948,19 +659,11 @@ valid_end = 40
 train_dataset = WeatherDataset(input_surface, input_upper_air, start_idx=0, end_idx=train_end)
 valid_dataset = WeatherDataset(input_surface, input_upper_air, start_idx=train_end, end_idx=valid_end)
 batch_size = 1  # 小batch size便于调试
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
-valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 print(f"Created data loaders with batch size {batch_size}")
 
-model = CanglongV3(
-    surface_mean=surface_mean,
-    surface_std=surface_std,
-    upper_mean=upper_mean,
-    upper_std=upper_std,
-    lambda_water=1e-11,      # 从0.01降到1e-11
-    lambda_energy=1e-12,     # 从0.001降到1e-12
-    lambda_pressure=1e-6     # 从0.0001降到1e-6
-)
+model = CanglongV3()
 
 # 多GPU训练
 if torch.cuda.device_count() > 1:
@@ -987,6 +690,7 @@ best_valid_loss = float('inf')
 lambda_water = 1e-11     # Water loss ~1e11 -> weight 1e-11 -> contribution ~1
 lambda_energy = 1e-12    # Energy loss ~1e12 -> weight 1e-12 -> contribution ~1  
 lambda_pressure = 1e-6   # Pressure loss ~1e6 -> weight 1e-6 -> contribution ~1
+focus_loss_weight = 1.0  # Adding once more keeps effective weight at 2x for focus vars
 
 # 训练循环
 print("Starting training with physical constraints...")
@@ -996,23 +700,24 @@ for epoch in range(num_epochs):
     train_loss = 0.0
     surface_loss = 0.0
     upper_air_loss = 0.0
+    focus_loss_total = 0.0
     water_loss_total = 0.0
     energy_loss_total = 0.0
     pressure_loss_total = 0.0
     
     train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
     for input_surface, input_upper_air, target_surface, target_upper_air in train_pbar:
-        # 将数据移动到设备
-        input_surface = input_surface.to(device)
-        input_upper_air = input_upper_air.to(device)
-        target_surface = target_surface.to(device)
-        target_upper_air = target_upper_air.to(device)
+        # 将数据移动到设备并转换为float32
+        input_surface = input_surface.float().to(device)
+        input_upper_air = input_upper_air.float().to(device)
+        target_surface = target_surface.float().to(device)
+        target_upper_air = target_upper_air.float().to(device)
         
         # 标准化输入数据
-        input_surface_norm = (input_surface - surface_mean.unsqueeze(0).unsqueeze(2)) / surface_std.unsqueeze(0).unsqueeze(2)
-        input_upper_air_norm = (input_upper_air - upper_mean.unsqueeze(0).unsqueeze(3)) / upper_std.unsqueeze(0).unsqueeze(3)
-        target_surface_norm = (target_surface - surface_mean.unsqueeze(0).unsqueeze(2)) / surface_std.unsqueeze(0).unsqueeze(2)
-        target_upper_air_norm = (target_upper_air - upper_mean.unsqueeze(0).unsqueeze(3)) / upper_std.unsqueeze(0).unsqueeze(3)
+        input_surface_norm = (input_surface - surface_mean) / surface_std
+        input_upper_air_norm = (input_upper_air - upper_mean) / upper_std
+        target_surface_norm = (target_surface - surface_mean) / surface_std
+        target_upper_air_norm = (target_upper_air - upper_mean) / upper_std
         
         # 清除梯度
         optimizer.zero_grad()
@@ -1024,6 +729,12 @@ for epoch in range(num_epochs):
         loss_surface = criterion(output_surface, target_surface_norm)
         loss_upper_air = criterion(output_upper_air, target_upper_air_norm)
         
+        # 计算加权关注变量损失
+        loss_focus = calculate_focus_variable_loss(
+            output_surface, target_surface_norm,
+            output_upper_air, target_upper_air_norm
+        )
+
         # 计算物理约束损失
         loss_water = calculate_water_balance_loss(
             input_surface_norm, output_surface, 
@@ -1038,6 +749,7 @@ for epoch in range(num_epochs):
         
         # 总损失
         loss = loss_surface + loss_upper_air + \
+               focus_loss_weight * loss_focus + \
                lambda_water * loss_water + \
                lambda_energy * loss_energy + \
                lambda_pressure * loss_pressure
@@ -1053,6 +765,7 @@ for epoch in range(num_epochs):
         train_loss += batch_loss
         surface_loss += loss_surface.item()
         upper_air_loss += loss_upper_air.item()
+        focus_loss_total += loss_focus.item()
         water_loss_total += loss_water.item()
         energy_loss_total += loss_energy.item()
         pressure_loss_total += loss_pressure.item()
@@ -1062,6 +775,7 @@ for epoch in range(num_epochs):
             "loss": f"{batch_loss:.4f}",
             "surf": f"{loss_surface.item():.4f}",
             "upper": f"{loss_upper_air.item():.4f}",
+            "focus": f"{loss_focus.item():.4f}",
             "water": f"{loss_water.item():.2e}",
             "energy": f"{loss_energy.item():.2e}",
             "pressure": f"{loss_pressure.item():.2e}"
@@ -1071,6 +785,7 @@ for epoch in range(num_epochs):
     train_loss = train_loss / len(train_loader)
     surface_loss = surface_loss / len(train_loader)
     upper_air_loss = upper_air_loss / len(train_loader)
+    focus_loss_total = focus_loss_total / len(train_loader)
     water_loss_total = water_loss_total / len(train_loader)
     energy_loss_total = energy_loss_total / len(train_loader)
     pressure_loss_total = pressure_loss_total / len(train_loader)
@@ -1080,6 +795,7 @@ for epoch in range(num_epochs):
     valid_loss = 0.0
     valid_surface_loss = 0.0
     valid_upper_air_loss = 0.0
+    valid_focus_loss = 0.0
     valid_water_loss = 0.0
     valid_energy_loss = 0.0
     valid_pressure_loss = 0.0
@@ -1094,10 +810,10 @@ for epoch in range(num_epochs):
             target_upper_air = target_upper_air.float().to(device)
             
             # 标准化输入数据
-            input_surface_norm = (input_surface - surface_mean.unsqueeze(0).unsqueeze(2)) / surface_std.unsqueeze(0).unsqueeze(2)
-            input_upper_air_norm = (input_upper_air - upper_mean.unsqueeze(0).unsqueeze(3)) / upper_std.unsqueeze(0).unsqueeze(3)
-            target_surface_norm = (target_surface - surface_mean.unsqueeze(0).unsqueeze(2)) / surface_std.unsqueeze(0).unsqueeze(2)
-            target_upper_air_norm = (target_upper_air - upper_mean.unsqueeze(0).unsqueeze(3)) / upper_std.unsqueeze(0).unsqueeze(3)
+            input_surface_norm = (input_surface - surface_mean) / surface_std
+            input_upper_air_norm = (input_upper_air - upper_mean) / upper_std
+            target_surface_norm = (target_surface - surface_mean) / surface_std
+            target_upper_air_norm = (target_upper_air - upper_mean) / upper_std
             
             # 前向传播
             output_surface, output_upper_air = model(input_surface_norm.float(), input_upper_air_norm)
@@ -1106,6 +822,12 @@ for epoch in range(num_epochs):
             loss_surface = criterion(output_surface, target_surface_norm)
             loss_upper_air = criterion(output_upper_air, target_upper_air_norm)
             
+            # 计算加权关注变量损失
+            loss_focus = calculate_focus_variable_loss(
+                output_surface, target_surface_norm,
+                output_upper_air, target_upper_air_norm
+            )
+
             # 计算物理约束损失
             loss_water = calculate_water_balance_loss(
                 input_surface_norm, output_surface, 
@@ -1120,6 +842,7 @@ for epoch in range(num_epochs):
             
             # 总损失
             loss = loss_surface + loss_upper_air + \
+                   focus_loss_weight * loss_focus + \
                    lambda_water * loss_water + \
                    lambda_energy * loss_energy + \
                    lambda_pressure * loss_pressure
@@ -1129,6 +852,7 @@ for epoch in range(num_epochs):
             valid_loss += batch_loss
             valid_surface_loss += loss_surface.item()
             valid_upper_air_loss += loss_upper_air.item()
+            valid_focus_loss += loss_focus.item()
             valid_water_loss += loss_water.item()
             valid_energy_loss += loss_energy.item()
             valid_pressure_loss += loss_pressure.item()
@@ -1138,6 +862,7 @@ for epoch in range(num_epochs):
                 "loss": f"{batch_loss:.4f}",
                 "surf": f"{loss_surface.item():.4f}",
                 "upper": f"{loss_upper_air.item():.4f}",
+                "focus": f"{loss_focus.item():.4f}",
                 "water": f"{loss_water.item():.2e}",
                 "energy": f"{loss_energy.item():.2e}",
                 "pressure": f"{loss_pressure.item():.2e}"
@@ -1147,6 +872,7 @@ for epoch in range(num_epochs):
     valid_loss = valid_loss / len(valid_loader)
     valid_surface_loss = valid_surface_loss / len(valid_loader)
     valid_upper_air_loss = valid_upper_air_loss / len(valid_loader)
+    valid_focus_loss = valid_focus_loss / len(valid_loader)
     valid_water_loss = valid_water_loss / len(valid_loader)
     valid_energy_loss = valid_energy_loss / len(valid_loader)
     valid_pressure_loss = valid_pressure_loss / len(valid_loader)
@@ -1154,12 +880,12 @@ for epoch in range(num_epochs):
     # 打印损失
     print(f"\nEpoch {epoch+1}/{num_epochs}")
     print(f"  Train - Total: {train_loss:.6f}")
-    print(f"         MSE - Surface: {surface_loss:.6f}, Upper Air: {upper_air_loss:.6f}")
+    print(f"         MSE - Surface: {surface_loss:.6f}, Upper Air: {upper_air_loss:.6f}, Focus vars: {focus_loss_total:.6f}")
     print(f"         Physical Raw - Water: {water_loss_total:.2e}, Energy: {energy_loss_total:.2e}, Pressure: {pressure_loss_total:.2e}")
     print(f"         Physical Weighted - Water: {lambda_water*water_loss_total:.6f}, Energy: {lambda_energy*energy_loss_total:.6f}, Pressure: {lambda_pressure*pressure_loss_total:.6f}")
     print(f"  Valid - Total: {valid_loss:.6f}")
-    print(f"         MSE - Surface: {valid_surface_loss:.6f}, Upper Air: {valid_upper_air_loss:.6f}")
+    print(f"         MSE - Surface: {valid_surface_loss:.6f}, Upper Air: {valid_upper_air_loss:.6f}, Focus vars: {valid_focus_loss:.6f}")
     print(f"         Physical Raw - Water: {valid_water_loss:.2e}, Energy: {valid_energy_loss:.2e}, Pressure: {valid_pressure_loss:.2e}")
     print(f"         Physical Weighted - Water: {lambda_water*valid_water_loss:.6f}, Energy: {lambda_energy*valid_energy_loss:.6f}, Pressure: {lambda_pressure*valid_pressure_loss:.6f}")
 
-
+torch.save(model.module.state_dict() if hasattr(model, 'module') else model.state_dict(), f'{save_dir}/model_v3_new.pth')

@@ -375,14 +375,14 @@ class CanglongV3(nn.Module):
         self.patchrecovery2d = RecoveryImage2D((721, 1440), (4, 4), 2 * embed_dim, 4) #8, 8
         self.decoder3d = Decoder(image_channels=17, latent_dim=2 * 96)
         self.patchrecovery3d = RecoveryImage3D(image_size=(16, 721, 1440), 
-                                               patch_size=(1, 4, 4), 
-                                               input_channels=2 * embed_dim, 
-                                               output_channels=16) #2, 8, 8
+                                              patch_size=(1, 4, 4), 
+                                              input_channels=2 * embed_dim, 
+                                              output_channels=16) #2, 8, 8
         self.patchrecovery4d = RecoveryImage4D(image_size=(7, 5, 1, 721, 1440), 
-                                               patch_size=(2, 1, 4, 4), 
-                                               input_channels=2 * embed_dim, 
-                                               output_channels=7,
-                                               target_size=(7, 5, 1, 721, 1440))
+                                              patch_size=(2, 1, 4, 4), 
+                                              input_channels=2 * embed_dim, 
+                                              output_channels=7,
+                                              target_size=(7, 5, 1, 721, 1440))
         
 
         self.conv_constant = nn.Conv2d(in_channels=64, out_channels=96, kernel_size=5, stride=4, padding=2)
@@ -650,18 +650,14 @@ print(f"Surface std shape: {surface_std.shape}")
 print(f"Upper mean shape: {upper_mean.shape}")
 print(f"Upper std shape: {upper_std.shape}")
 
-# 计算数据集划分点 - 按照6:2:2的时间序列划分
-total_samples = 52
-train_end = 30
-valid_end = 40
+# 使用全部数据进行训练 (不再划分验证集)
+total_samples = 28
+train_dataset = WeatherDataset(input_surface, input_upper_air, start_idx=0, end_idx=total_samples)
 
-# 创建数据集
-train_dataset = WeatherDataset(input_surface, input_upper_air, start_idx=0, end_idx=train_end)
-valid_dataset = WeatherDataset(input_surface, input_upper_air, start_idx=train_end, end_idx=valid_end)
 batch_size = 1  # 小batch size便于调试
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-print(f"Created data loaders with batch size {batch_size}")
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+print(f"Created data loader with batch size {batch_size}")
+print(f"Total training samples: {len(train_dataset)}")
 
 model = CanglongV3()
 
@@ -682,8 +678,8 @@ save_dir = 'checkpoints_v3'
 os.makedirs(save_dir, exist_ok=True)
 
 # 训练参数
-num_epochs = 1
-best_valid_loss = float('inf')
+num_epochs = 200  # 增加训练轮数
+checkpoint_interval = 25  # 每40个epoch保存一次
 
 # 物理约束权重（根据损失量级动态调整）
 # 目标：让每个物理约束贡献约1-10的损失量级
@@ -693,7 +689,7 @@ lambda_pressure = 1e-6   # Pressure loss ~1e6 -> weight 1e-6 -> contribution ~1
 focus_loss_weight = 1.0  # Adding once more keeps effective weight at 2x for focus vars
 
 # 训练循环
-print("Starting training with physical constraints...")
+print("Starting training without validation...")
 for epoch in range(num_epochs):
     # 训练阶段
     model.train()
@@ -705,7 +701,7 @@ for epoch in range(num_epochs):
     energy_loss_total = 0.0
     pressure_loss_total = 0.0
     
-    train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
+    train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
     for input_surface, input_upper_air, target_surface, target_upper_air in train_pbar:
         # 将数据移动到设备并转换为float32
         input_surface = input_surface.float().to(device)
@@ -790,102 +786,20 @@ for epoch in range(num_epochs):
     energy_loss_total = energy_loss_total / len(train_loader)
     pressure_loss_total = pressure_loss_total / len(train_loader)
     
-    # 验证阶段
-    model.eval()
-    valid_loss = 0.0
-    valid_surface_loss = 0.0
-    valid_upper_air_loss = 0.0
-    valid_focus_loss = 0.0
-    valid_water_loss = 0.0
-    valid_energy_loss = 0.0
-    valid_pressure_loss = 0.0
-    
-    with torch.no_grad():
-        valid_pbar = tqdm(valid_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Valid]")
-        for input_surface, input_upper_air, target_surface, target_upper_air in valid_pbar:
-            # 将数据移动到设备
-            input_surface = input_surface.float().to(device)
-            input_upper_air = input_upper_air.float().to(device)
-            target_surface = target_surface.float().to(device)
-            target_upper_air = target_upper_air.float().to(device)
-            
-            # 标准化输入数据
-            input_surface_norm = (input_surface - surface_mean) / surface_std
-            input_upper_air_norm = (input_upper_air - upper_mean) / upper_std
-            target_surface_norm = (target_surface - surface_mean) / surface_std
-            target_upper_air_norm = (target_upper_air - upper_mean) / upper_std
-            
-            # 前向传播
-            output_surface, output_upper_air = model(input_surface_norm.float(), input_upper_air_norm)
-            
-            # 计算MSE损失
-            loss_surface = criterion(output_surface, target_surface_norm)
-            loss_upper_air = criterion(output_upper_air, target_upper_air_norm)
-            
-            # 计算加权关注变量损失
-            loss_focus = calculate_focus_variable_loss(
-                output_surface, target_surface_norm,
-                output_upper_air, target_upper_air_norm
-            )
-
-            # 计算物理约束损失
-            loss_water = calculate_water_balance_loss(
-                input_surface_norm, output_surface, 
-                surface_mean, surface_std
-            )
-            loss_energy = calculate_energy_balance_loss(
-                output_surface, surface_mean, surface_std
-            )
-            loss_pressure = calculate_hydrostatic_balance_loss(
-                output_upper_air, upper_mean, upper_std
-            )
-            
-            # 总损失
-            loss = loss_surface + loss_upper_air + \
-                   focus_loss_weight * loss_focus + \
-                   lambda_water * loss_water + \
-                   lambda_energy * loss_energy + \
-                   lambda_pressure * loss_pressure
-            
-            # 累加损失
-            batch_loss = loss.item()
-            valid_loss += batch_loss
-            valid_surface_loss += loss_surface.item()
-            valid_upper_air_loss += loss_upper_air.item()
-            valid_focus_loss += loss_focus.item()
-            valid_water_loss += loss_water.item()
-            valid_energy_loss += loss_energy.item()
-            valid_pressure_loss += loss_pressure.item()
-            
-            # 更新进度条
-            valid_pbar.set_postfix({
-                "loss": f"{batch_loss:.4f}",
-                "surf": f"{loss_surface.item():.4f}",
-                "upper": f"{loss_upper_air.item():.4f}",
-                "focus": f"{loss_focus.item():.4f}",
-                "water": f"{loss_water.item():.2e}",
-                "energy": f"{loss_energy.item():.2e}",
-                "pressure": f"{loss_pressure.item():.2e}"
-            })
-    
-    # 计算平均验证损失
-    valid_loss = valid_loss / len(valid_loader)
-    valid_surface_loss = valid_surface_loss / len(valid_loader)
-    valid_upper_air_loss = valid_upper_air_loss / len(valid_loader)
-    valid_focus_loss = valid_focus_loss / len(valid_loader)
-    valid_water_loss = valid_water_loss / len(valid_loader)
-    valid_energy_loss = valid_energy_loss / len(valid_loader)
-    valid_pressure_loss = valid_pressure_loss / len(valid_loader)
-    
     # 打印损失
     print(f"\nEpoch {epoch+1}/{num_epochs}")
     print(f"  Train - Total: {train_loss:.6f}")
     print(f"         MSE - Surface: {surface_loss:.6f}, Upper Air: {upper_air_loss:.6f}, Focus vars: {focus_loss_total:.6f}")
     print(f"         Physical Raw - Water: {water_loss_total:.2e}, Energy: {energy_loss_total:.2e}, Pressure: {pressure_loss_total:.2e}")
     print(f"         Physical Weighted - Water: {lambda_water*water_loss_total:.6f}, Energy: {lambda_energy*energy_loss_total:.6f}, Pressure: {lambda_pressure*pressure_loss_total:.6f}")
-    print(f"  Valid - Total: {valid_loss:.6f}")
-    print(f"         MSE - Surface: {valid_surface_loss:.6f}, Upper Air: {valid_upper_air_loss:.6f}, Focus vars: {valid_focus_loss:.6f}")
-    print(f"         Physical Raw - Water: {valid_water_loss:.2e}, Energy: {valid_energy_loss:.2e}, Pressure: {valid_pressure_loss:.2e}")
-    print(f"         Physical Weighted - Water: {lambda_water*valid_water_loss:.6f}, Energy: {lambda_energy*valid_energy_loss:.6f}, Pressure: {lambda_pressure*valid_pressure_loss:.6f}")
+    
+    # 每40个epoch保存模型
+    if (epoch + 1) % checkpoint_interval == 0:
+        checkpoint_path = f'{save_dir}/model_v3_{epoch+1}.pth'
+        torch.save(model.module.state_dict() if hasattr(model, 'module') else model.state_dict(), checkpoint_path)
+        print(f"  Saved checkpoint: {checkpoint_path}")
 
-torch.save(model.module.state_dict() if hasattr(model, 'module') else model.state_dict(), f'{save_dir}/model_v3_new.pth')
+# 保存最终模型
+final_path = f'{save_dir}/model_v3_final.pth'
+torch.save(model.module.state_dict() if hasattr(model, 'module') else model.state_dict(), final_path)
+print(f"\nTraining completed! Final model saved: {final_path}")
