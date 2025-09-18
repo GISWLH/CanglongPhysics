@@ -1,5 +1,8 @@
 constant_masks/*.pt
 # Ignore checkpoints
 checkpoints/
+checkpoints_v2/
 checkpoints_v3/
 code_v2/checkpoints_v3/
+# Ignore large model files (>200MB)
+*.pth
