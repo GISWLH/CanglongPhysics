@@ -554,14 +554,12 @@ class Canglong(nn.Module):
         return output_surface, output_upper_air
 
 
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import os
-from pathlib import Path
 from tqdm import tqdm
 import h5py as h5
 
@@ -571,14 +569,13 @@ class WeatherDataset(Dataset):
         初始化气象数据集 - 按时间序列顺序划分
         
         参数:
-            surface_data: 表面数据，形状为 [time, 17, 721, 1440]
-            upper_air_data: 高空数据，形状为 [time, 7, 5, 721, 1440]
+            surface_data: 表面数据，形状为 [17, 100, 721, 1440]
+            upper_air_data: 高空数据，形状为 [7, 5, 100, 721, 1440]
             start_idx: 开始索引
             end_idx: 结束索引
         """
         self.surface_data = surface_data
         self.upper_air_data = upper_air_data
-        self.start_idx = start_idx
         self.length = end_idx - start_idx - 2  # 减2确保有足够的目标数据
         
         print(f"Dataset from index {start_idx} to {end_idx}, sample count: {self.length}")
@@ -587,17 +584,15 @@ class WeatherDataset(Dataset):
         return self.length
     
     def __getitem__(self, idx):
-        actual_idx = self.start_idx + idx
-
         # 提取输入数据 (t和t+1时刻)
-        input_surface = self.surface_data[actual_idx:actual_idx+2]
+        input_surface = self.surface_data[idx:idx+2]  # [1, 17, 2, 721, 1440]
         
         # 提取高空数据 (t和t+1时刻)
-        input_upper_air = self.upper_air_data[actual_idx:actual_idx+2]
+        input_upper_air = self.upper_air_data[idx:idx+2]  # [1, 7, 5, 2, 721, 1440]
         
         # 提取目标数据 (t+2时刻)
-        target_surface = self.surface_data[actual_idx+2]
-        target_upper_air = self.upper_air_data[actual_idx+2]
+        target_surface = self.surface_data[idx+2]  # [1, 16, 721, 1440]
+        target_upper_air = self.upper_air_data[idx+2]  # [1, 7, 4, 721, 1440]
         
         return input_surface, input_upper_air, target_surface, target_upper_air
 
@@ -611,40 +606,42 @@ print(f"Using device: {device}")
 
 # 加载数据
 print("Loading data...")
-h5_file = h5.File('/gz-data/ERA5_2023_weekly.h5', 'r')
-input_surface = h5_file['surface'][:]  # (52, 17, 721, 1440)
-input_upper_air = h5_file['upper_air'][:]  # (52, 7, 5, 721, 1440)
-h5_file.close()
+input_surface, input_upper_air = h5.File('/gz-data/ERA5_2023_weekly.h5')['surface'], h5.File('/gz-data/ERA5_2023_weekly.h5')['upper_air']
+print(f"Surface data shape: {input_surface.shape}") #(52, 17, 721, 1440)
+print(f"Upper air data shape: {input_upper_air.shape}") #(52, 7, 5, 721, 1440)
 
-print(f"Surface data shape: {input_surface.shape}")
-print(f"Upper air data shape: {input_upper_air.shape}")
+# 计算数据集划分点 - 按照6:2:2的时间序列划分
+total_samples = 52#input_surface.shape[0]  # 假设为100
+train_end = 30#int(total_samples * 0.6)  # 60
+valid_end = 40#int(total_samples * 0.8)  # 80
 
-# 仅使用前28个时间步进行训练
-total_samples = 28
-train_dataset = WeatherDataset(input_surface, input_upper_air, start_idx=0, end_idx=total_samples)
+# 创建数据集
+train_dataset = WeatherDataset(input_surface, input_upper_air, start_idx=0, end_idx=train_end)
+valid_dataset = WeatherDataset(input_surface, input_upper_air, start_idx=train_end, end_idx=valid_end)
+test_dataset = WeatherDataset(input_surface, input_upper_air, start_idx=valid_end, end_idx=total_samples)
 
-# 创建数据加载器
-batch_size = 1
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+# 创建数据加载器 - 使用较小的batch size以便于调试
+batch_size = 1  # 小batch size便于调试
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=2)  # 不打乱时间顺序
+valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
-print(f"Created training loader with batch size {batch_size} and {len(train_dataset)} samples")
+print(f"Created data loaders with batch size {batch_size}")
 import sys
 sys.path.append('code_v2')
 from convert_dict_to_pytorch_arrays import load_normalization_arrays
 
 # 调用函数获取四个数组
 json = '/home/CanglongPhysics/code_v2/ERA5_1940_2019_combined_mean_std.json'
-surface_mean_np, surface_std_np, upper_mean_np, upper_std_np = load_normalization_arrays(json)
+surface_mean, surface_std, upper_mean, upper_std = load_normalization_arrays(json)
 
-# 转换为张量并移动到设备
-surface_mean = torch.from_numpy(surface_mean_np).to(device=device, dtype=torch.float32)
-surface_std = torch.from_numpy(surface_std_np).to(device=device, dtype=torch.float32)
-upper_mean = torch.from_numpy(upper_mean_np).to(device=device, dtype=torch.float32)
-upper_std = torch.from_numpy(upper_std_np).to(device=device, dtype=torch.float32)
 
-# 创建模型
+# 创建模型并加载已有权重，继续训练
+checkpoint_path = '/gz-data/model_v1_150.pth'
 model = Canglong()
-#model = torch.load('../model/model_v1_100.pth')
+state_dict = torch.load(checkpoint_path, map_location='cpu')
+model.load_state_dict(state_dict)
+
 # 多GPU训练
 if torch.cuda.device_count() > 1:
     print(f"Using {torch.cuda.device_count()} GPUs!")
@@ -658,88 +655,108 @@ optimizer = optim.Adam(model.parameters(), lr=0.0005)
 criterion = nn.MSELoss()
 
 # 创建保存目录
-save_dir = 'checkpoints_v1'
+save_dir = '/gz-data'
 os.makedirs(save_dir, exist_ok=True)
 
-# 尝试从已有检查点继续训练
-start_epoch = 0
-latest_checkpoint = None
-checkpoint_files = sorted(Path(save_dir).glob('model_v1_epoch*.pth'),
-                          key=lambda p: int(p.stem.split('epoch')[1]) if 'epoch' in p.stem else -1)
-
-if checkpoint_files:
-    latest_checkpoint = checkpoint_files[-1]
-    try:
-        state_dict = torch.load(latest_checkpoint, map_location=device)
-        if hasattr(model, 'module'):
-            model.module.load_state_dict(state_dict)
-        else:
-            model.load_state_dict(state_dict)
-        start_epoch = int(latest_checkpoint.stem.split('epoch')[1])
-        print(f"Resumed model weights from {latest_checkpoint} (epoch {start_epoch}).")
-    except (FileNotFoundError, ValueError, KeyError) as err:
-        print(f"Failed to load checkpoint {latest_checkpoint}: {err}. Starting fresh training.")
-        start_epoch = 0
-else:
-    print("No checkpoint found. Starting fresh training.")
-
-# 训练参数
-num_epochs = 200
-checkpoint_interval = 25
+# 训练参数（在已有权重基础上继续训练 50 个 epoch）
+num_epochs = 50
+best_valid_loss = float('inf')
 
 # 训练循环
 print("Starting training...")
-for epoch in range(start_epoch, num_epochs):
+for epoch in range(num_epochs):
+    # 训练阶段
     model.train()
     train_loss = 0.0
     surface_loss = 0.0
     upper_air_loss = 0.0
-
-    train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
+    
+    train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
     for input_surface, input_upper_air, target_surface, target_upper_air in train_pbar:
-        input_surface = input_surface.float().to(device)
-        input_upper_air = input_upper_air.float().to(device)
-        target_surface = target_surface.float().to(device)
-        target_upper_air = target_upper_air.float().to(device)
-
-        input_surface = (input_surface.permute(0, 2, 1, 3, 4) - surface_mean) / surface_std
-        input_upper_air = (input_upper_air.permute(0, 2, 3, 1, 4, 5) - upper_mean) / upper_std
-        target_surface = (target_surface.unsqueeze(2) - surface_mean) / surface_std
-        target_upper_air = (target_upper_air.unsqueeze(3) - upper_mean) / upper_std
-
+        # 将数据移动到设备
+        input_surface = ((input_surface.permute(0, 2, 1, 3, 4) - surface_mean) / surface_std).to(device)
+        input_upper_air = ((input_upper_air.permute(0, 2, 3, 1, 4, 5) - upper_mean) / upper_std).to(device)
+        target_surface = ((target_surface.unsqueeze(2) - surface_mean) / surface_mean).to(device)
+        target_upper_air = ((target_upper_air.unsqueeze(3) - upper_mean) / upper_std).to(device)
+        
+        # 清除梯度
         optimizer.zero_grad()
+        
+        # 前向传播
         output_surface, output_upper_air = model(input_surface, input_upper_air)
-
+        
+        # 计算损失
         loss_surface = criterion(output_surface, target_surface)
         loss_upper_air = criterion(output_upper_air, target_upper_air)
         loss = loss_surface + loss_upper_air
-
+        
+        # 反向传播和优化
         loss.backward()
         optimizer.step()
-
+        
+        # 累加损失
         batch_loss = loss.item()
         train_loss += batch_loss
         surface_loss += loss_surface.item()
         upper_air_loss += loss_upper_air.item()
-
+        
+        # 更新进度条
         train_pbar.set_postfix({
             "loss": f"{batch_loss:.6f}",
             "surface": f"{loss_surface.item():.6f}",
             "upper_air": f"{loss_upper_air.item():.6f}"
         })
-
+    
+    # 计算平均训练损失
     train_loss = train_loss / len(train_loader)
     surface_loss = surface_loss / len(train_loader)
     upper_air_loss = upper_air_loss / len(train_loader)
-
+    
+    # 验证阶段
+    model.eval()
+    valid_loss = 0.0
+    valid_surface_loss = 0.0
+    valid_upper_air_loss = 0.0
+    
+    with torch.no_grad():
+        valid_pbar = tqdm(valid_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Valid]")
+        for input_surface, input_upper_air, target_surface, target_upper_air in valid_pbar:
+            # 将数据移动到设备
+            input_surface = ((input_surface.permute(0, 2, 1, 3, 4) - surface_mean) / surface_std).to(device)
+            input_upper_air = ((input_upper_air.permute(0, 2, 3, 1, 4, 5) - upper_mean) / upper_std).to(device)
+            target_surface = ((target_surface.unsqueeze(2) - surface_mean) / surface_mean).to(device)
+            target_upper_air = ((target_upper_air.unsqueeze(3) - upper_mean) / upper_std).to(device)
+            
+            # 前向传播
+            output_surface, output_upper_air = model(input_surface, input_upper_air)
+            
+            # 计算损失
+            loss_surface = criterion(output_surface, target_surface)
+            loss_upper_air = criterion(output_upper_air, target_upper_air)
+            loss = loss_surface + loss_upper_air
+            
+            # 累加损失
+            batch_loss = loss.item()
+            valid_loss += batch_loss
+            valid_surface_loss += loss_surface.item()
+            valid_upper_air_loss += loss_upper_air.item()
+            
+            # 更新进度条
+            valid_pbar.set_postfix({
+                "loss": f"{batch_loss:.6f}",
+                "surface": f"{loss_surface.item():.6f}",
+                "upper_air": f"{loss_upper_air.item():.6f}"
+            })
+    
+    # 计算平均验证损失
+    valid_loss = valid_loss / len(valid_loader)
+    valid_surface_loss = valid_surface_loss / len(valid_loader)
+    valid_upper_air_loss = valid_upper_air_loss / len(valid_loader)
+    
+    # 打印损失
     print(f"Epoch {epoch+1}/{num_epochs}")
     print(f"  Train - Total: {train_loss:.6f}, Surface: {surface_loss:.6f}, Upper Air: {upper_air_loss:.6f}")
+    print(f"  Valid - Total: {valid_loss:.6f}, Surface: {valid_surface_loss:.6f}, Upper Air: {valid_upper_air_loss:.6f}")
 
-    if (epoch + 1) % checkpoint_interval == 0:
-        checkpoint_path = f"{save_dir}/model_v1_epoch{epoch+1}.pth"
-        torch.save(model.module.state_dict() if hasattr(model, 'module') else model.state_dict(), checkpoint_path)
-        print(f"  Saved checkpoint: {checkpoint_path}")
-
-final_path = f"{save_dir}/model_v1_final.pth"
-torch.save(model.module.state_dict() if hasattr(model, 'module') else model.state_dict(), final_path)
-print(f"\nTraining completed! Final model saved: {final_path}")
+save_path = os.path.join(save_dir, 'model_v1_200.pth')
+torch.save(model.module.state_dict() if hasattr(model, 'module') else model.state_dict(), save_path)

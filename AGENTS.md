@@ -520,6 +520,15 @@ delta_phi_physical = 287 * temp_avg * (log(850) - log(700))
 计算静力平衡残差:
 residual_hydrostatic = delta_phi_model - delta_phi_physical
 loss_pressure = MSE(residual_hydrostatic, 0)
+
+## 评估模式
+### 简单消融实验
+这里训练了3个模型Canglong CanglongV2 CanglongV3
+其中V1没有任何技巧，V2在V1的基础上添加了风向物理信息约束 V3在V2的基础上添加了物理方程约束，V3可看作最终模型。
+我希望绘制一张柱图，X轴是epoch 50 100 150 200，y轴是评分。V3评分减去V2评分，就是物理方程约束的贡献，V2减去V1，就是风向约束的贡献
+每个柱是最终的V3值，但是分三段，分别是基准贡献，风向约束的贡献，物理方程约束的贡献，相加正好是总评分。
+先用data/model_raw_performance.csv的Combined score (mean PCC/ACC)评分
+
 #### 计算RMSE\ACC\SPEI的同号率
 
 分为CAS-Canglong和ECMWF的比较

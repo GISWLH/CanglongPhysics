@@ -1,0 +1,60 @@
+V1_epoch50,V2_epoch50,V3_epoch50
+Test set summary (precipitation & key variables):,Test set summary (precipitation & key variables):,Test set summary (precipitation & key variables):
+Average precip PCC:  0.291946,Average precip PCC:  0.266038,Average precip PCC:  0.592900
+Average precip ACC:  0.286595,Average precip ACC:  0.263888,Average precip ACC:  0.592128
+Average precip RMSE (norm.): 1.917039,Average precip RMSE (norm.): 1.897909,Average precip RMSE (norm.): 1.548284
+Combined score (mean PCC/ACC): 0.289270,Combined score (mean PCC/ACC): 0.294963,Combined score (mean PCC/ACC): 0.492514
+"Average avg_tnlwrf PCC: -0.705902, RMSE(norm.): 1.021833","Average avg_tnlwrf PCC: -0.641108, RMSE(norm.): 0.989626","Average avg_tnlwrf PCC: 0.919279, RMSE(norm.): 0.361414"
+"Average t2m PCC:       0.581375, RMSE(norm.): 0.873286","Average t2m PCC:       0.481809, RMSE(norm.): 0.879158","Average t2m PCC:       0.981588, RMSE(norm.): 0.197735"
+"Average d2m PCC:       0.486026, RMSE(norm.): 0.868741","Average d2m PCC:       0.605635, RMSE(norm.): 0.857001","Average d2m PCC:       0.978258, RMSE(norm.): 0.208165"
+"Average u200 PCC:      0.800022, RMSE(norm.): 0.593918","Average u200 PCC:      0.804596, RMSE(norm.): 0.585687","Average u200 PCC:      0.823237, RMSE(norm.): 0.557877"
+"Average u850 PCC:      0.786516, RMSE(norm.): 0.636049","Average u850 PCC:      0.788336, RMSE(norm.): 0.644788","Average u850 PCC:      0.804410, RMSE(norm.): 0.612720"
+Average grouped PCC (precip/t2m/d2m/u200/u850): 0.589177,Average grouped PCC (precip/t2m/d2m/u200/u850): 0.589283,Average grouped PCC (precip/t2m/d2m/u200/u850): 0.836079
+Average grouped RMSE(norm.) (precip/t2m/d2m/u200/u850): 0.977806,Average grouped RMSE(norm.) (precip/t2m/d2m/u200/u850): 0.972909,Average grouped RMSE(norm.) (precip/t2m/d2m/u200/u850): 0.624956
+Average surface RMSE(norm.):  18.335386,Average surface RMSE(norm.):  18.067844,Average surface RMSE(norm.):  0.986156
+Average upper-air RMSE(norm.):0.659648,Average upper-air RMSE(norm.):0.661032,Average upper-air RMSE(norm.):0.640309
+V1_epoch100,V2_epoch100,V3_epoch100
+Test set summary (precipitation & key variables):,Test set summary (precipitation & key variables):,Test set summary (precipitation & key variables):
+Average precip PCC:  0.406525,Average precip PCC:  0.447061,Average precip PCC:  0.559338
+Average precip ACC:  0.400657,Average precip ACC:  0.444206,Average precip ACC:  0.558384
+Average precip RMSE (norm.): 2.070744,Average precip RMSE (norm.): 1.981844,Average precip RMSE (norm.): 1.615831
+Combined score (mean PCC/ACC): 0.403591,Combined score (mean PCC/ACC): 0.445633,Combined score (mean PCC/ACC): 0.558861
+"Average avg_tnlwrf PCC: -0.703490, RMSE(norm.): 1.016440","Average avg_tnlwrf PCC: -0.791356, RMSE(norm.): 1.034743","Average avg_tnlwrf PCC: 0.917577, RMSE(norm.): 0.362754"
+"Average t2m PCC:       0.601935, RMSE(norm.): 0.866677","Average t2m PCC:       0.729536, RMSE(norm.): 0.863029","Average t2m PCC:       0.983460, RMSE(norm.): 0.194855"
+"Average d2m PCC:       0.677125, RMSE(norm.): 0.860651","Average d2m PCC:       0.803861, RMSE(norm.): 0.848335","Average d2m PCC:       0.979660, RMSE(norm.): 0.230786"
+"Average u200 PCC:      0.800283, RMSE(norm.): 0.590852","Average u200 PCC:      0.803016, RMSE(norm.): 0.587559","Average u200 PCC:      0.809036, RMSE(norm.): 0.579920"
+"Average u850 PCC:      0.777214, RMSE(norm.): 0.674890","Average u850 PCC:      0.788789, RMSE(norm.): 0.642389","Average u850 PCC:      0.788135, RMSE(norm.): 0.652677"
+Average grouped PCC (precip/t2m/d2m/u200/u850): 0.652616,Average grouped PCC (precip/t2m/d2m/u200/u850): 0.714453,Average grouped PCC (precip/t2m/d2m/u200/u850): 0.823926
+Average grouped RMSE(norm.) (precip/t2m/d2m/u200/u850): 1.012763,Average grouped RMSE(norm.) (precip/t2m/d2m/u200/u850): 0.984631,Average grouped RMSE(norm.) (precip/t2m/d2m/u200/u850): 0.654814
+Average surface RMSE(norm.):  18.767631,Average surface RMSE(norm.):  19.322091,Average surface RMSE(norm.):  0.937779
+Average upper-air RMSE(norm.):0.658127,Average upper-air RMSE(norm.):0.654707,Average upper-air RMSE(norm.):0.645736
+V1_epoch150,V2_epoch150,V3_epoch150
+Test set summary (precipitation & key variables):,Test set summary (precipitation & key variables):,Test set summary (precipitation & key variables):
+Average precip PCC:  0.491745,Average precip PCC:  0.511904,Average precip PCC:  0.558781
+Average precip ACC:  0.478286,Average precip ACC:  0.509937,Average precip ACC:  0.558720
+Average precip RMSE (norm.): 1.970810,Average precip RMSE (norm.): 1.959956,Average precip RMSE (norm.): 1.639159
+Combined score (mean PCC/ACC): 0.485016,Combined score (mean PCC/ACC): 0.510921,Combined score (mean PCC/ACC): 0.558750
+"Average avg_tnlwrf PCC: -0.780363, RMSE(norm.): 1.058658","Average avg_tnlwrf PCC: -0.817694, RMSE(norm.): 1.044743","Average avg_tnlwrf PCC: 0.922538, RMSE(norm.): 0.358945"
+"Average t2m PCC:       0.802535, RMSE(norm.): 0.854629","Average t2m PCC:       0.780347, RMSE(norm.): 0.858302","Average t2m PCC:       0.984288, RMSE(norm.): 0.203203"
+"Average d2m PCC:       0.794465, RMSE(norm.): 0.846382","Average d2m PCC:       0.830763, RMSE(norm.): 0.841451","Average d2m PCC:       0.980071, RMSE(norm.): 0.216585"
+"Average u200 PCC:      0.801141, RMSE(norm.): 0.592497","Average u200 PCC:      0.798763, RMSE(norm.): 0.605970","Average u200 PCC:      0.797969, RMSE(norm.): 0.604479"
+"Average u850 PCC:      0.780735, RMSE(norm.): 0.644441","Average u850 PCC:      0.781464, RMSE(norm.): 0.665334","Average u850 PCC:      0.779877, RMSE(norm.): 0.659984"
+Average grouped PCC (precip/t2m/d2m/u200/u850): 0.734124,Average grouped PCC (precip/t2m/d2m/u200/u850): 0.740648,Average grouped PCC (precip/t2m/d2m/u200/u850): 0.820197
+Average grouped RMSE(norm.) (precip/t2m/d2m/u200/u850): 0.981752,Average grouped RMSE(norm.) (precip/t2m/d2m/u200/u850): 0.986203,Average grouped RMSE(norm.) (precip/t2m/d2m/u200/u850): 0.664682
+Average surface RMSE(norm.):  20.064816,Average surface RMSE(norm.):  19.908155,Average surface RMSE(norm.):  0.929234
+Average upper-air RMSE(norm.):0.653611,Average upper-air RMSE(norm.):0.668009,Average upper-air RMSE(norm.):0.659239
+V1_epoch200,V2_epoch200,V3_epoch200
+Test set summary (precipitation & key variables):,Test set summary (precipitation & key variables):,Test set summary (precipitation & key variables):
+Average precip PCC:  0.557270,Average precip PCC:  0.563047,Average precip PCC:  0.557999
+Average precip ACC:  0.553679,Average precip ACC:  0.559605,Average precip ACC:  0.557914
+Average precip RMSE (norm.): 2.304774,Average precip RMSE (norm.): 1.949932,Average precip RMSE (norm.): 1.669661
+Combined score (mean PCC/ACC): 0.555475,Combined score (mean PCC/ACC): 0.561326,Combined score (mean PCC/ACC): 0.597957
+"Average avg_tnlwrf PCC: -0.798780, RMSE(norm.): 1.046823","Average avg_tnlwrf PCC: -0.831170, RMSE(norm.): 1.056955","Average avg_tnlwrf PCC: 0.920940, RMSE(norm.): 0.358166"
+"Average t2m PCC:       0.857673, RMSE(norm.): 0.853016","Average t2m PCC:       0.861922, RMSE(norm.): 0.834339","Average t2m PCC:       0.983688, RMSE(norm.): 0.202306"
+"Average d2m PCC:       0.854701, RMSE(norm.): 0.841796","Average d2m PCC:       0.863922, RMSE(norm.): 0.832195","Average d2m PCC:       0.979925, RMSE(norm.): 0.235994"
+"Average u200 PCC:      0.795399, RMSE(norm.): 0.595063","Average u200 PCC:      0.794991, RMSE(norm.): 0.595417","Average u200 PCC:      0.804288, RMSE(norm.): 0.598049"
+"Average u850 PCC:      0.770127, RMSE(norm.): 0.667586","Average u850 PCC:      0.778111, RMSE(norm.): 0.651164","Average u850 PCC:      0.781967, RMSE(norm.): 0.653184"
+Average grouped PCC (precip/t2m/d2m/u200/u850): 0.767034,Average grouped PCC (precip/t2m/d2m/u200/u850): 0.772399,Average grouped PCC (precip/t2m/d2m/u200/u850): 0.821573
+Average grouped RMSE(norm.) (precip/t2m/d2m/u200/u850): 1.052447,Average grouped RMSE(norm.) (precip/t2m/d2m/u200/u850): 0.972609,Average grouped RMSE(norm.) (precip/t2m/d2m/u200/u850): 0.671839
+Average surface RMSE(norm.):  20.285785,Average surface RMSE(norm.):  20.506925,Average surface RMSE(norm.):  0.937232
+Average upper-air RMSE(norm.):0.654990,Average upper-air RMSE(norm.):0.660909,Average upper-air RMSE(norm.):0.664913
