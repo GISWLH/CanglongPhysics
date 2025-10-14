@@ -15,6 +15,9 @@ import os
 from io import BytesIO
 import xarray as xr
 
+demo_start_time = '2025-09-24'
+demo_end_time = '2025-10-07'
+
 def upload_to_ftp(ftp_host, ftp_user, ftp_password, local_file_path, ftp_directory):
     """
     将文件上传到FTP服务器
@@ -57,8 +60,7 @@ def upload_to_ftp(ftp_host, ftp_user, ftp_password, local_file_path, ftp_directo
         print(f"Error uploading file: {e}")
         return False
     
-demo_start_time = '2025-08-06'
-demo_end_time = '2025-08-19'
+
 
 import rioxarray
 from ftplib import FTP
@@ -97,6 +99,7 @@ data_t2m = rioxarray.open_rasterio(temp_paths[2])
 # 删除临时文件
 for temp_path in temp_paths:
     os.unlink(temp_path)
+
 
 import xarray as xr
 import pandas as pd
@@ -152,8 +155,8 @@ import xarray as xr
 import numpy as np
 
 # Open the dataset
-temp = xr.open_dataset('/data/lhwang/npy/temp.nc', engine='netcdf4')
-climate = xr.open_dataset('/data/lhwang/npy/climate_variables_2000_2023_weekly.nc')
+temp = xr.open_dataset('E:/data/temp.nc', engine='netcdf4')
+climate = xr.open_dataset('E:/data/climate_variables_2000_2023_weekly.nc')
 
 import xarray as xr
 import pandas as pd
@@ -286,6 +289,46 @@ climate_cropped = climate_cropped.interp(
     method='linear'
 )
 
+# 3. 自定义函数计算周号（按照固定的周定义：1-7日为1周，8-14日为2周...）
+def get_week_of_year(date):
+    # 计算一年中的周数，第一周为1-7日
+    day_of_year = date.dt.dayofyear
+    return ((day_of_year - 1) // 7) + 1
+
+# 计算ECMWF的降水距平百分比
+precip_hist = climate_cropped['tp']
+precip_pred = standard_data['total_precipitation'].rename({'latitude': 'lat', 'longitude': 'lon'})
+precip_pred = precip_pred.sortby('lat', ascending=False).sortby('lon')
+precip_pred = precip_pred.interp(
+    lat=precip_hist['lat'],
+    lon=precip_hist['lon'],
+    method='linear'
+)
+
+hist_week_numbers = get_week_of_year(precip_hist['time'])
+pred_week_numbers = get_week_of_year(precip_pred['time'])
+
+precip_anomaly_percent_list = []
+
+for i, _ in enumerate(precip_pred['time']):
+    curr_week_num = pred_week_numbers.isel(time=i).item()
+    hist_precip_same_week = precip_hist.where(hist_week_numbers == curr_week_num, drop=True)
+    hist_mean = hist_precip_same_week.mean(dim='time')
+    curr_precip = precip_pred.isel(time=i)
+    precip_anomaly_percent = (curr_precip - hist_mean * 0.5) / (hist_mean * 0.5) * 100
+    precip_anomaly_percent = precip_anomaly_percent.clip(-200, 200)
+    precip_anomaly_percent_list.append(precip_anomaly_percent)
+
+precip_anomaly_percent = xr.concat(precip_anomaly_percent_list, dim='time')
+precip_anomaly_percent = precip_anomaly_percent.assign_coords(time=precip_pred['time'])
+
+input_end_date = datetime.strptime(demo_end_time, '%Y-%m-%d')
+ec_anom_start_date = input_end_date + timedelta(days=1)
+ec_anom_end_date = input_end_date + timedelta(days=6*7)
+ec_prcp_anom_filename = f"EC_PrcpAnomPercent_forecast_{ec_anom_start_date.strftime('%Y-%m-%d')}_{ec_anom_end_date.strftime('%Y-%m-%d')}.nc"
+ec_prcp_anom_local_file_path = os.path.join('Z:/Data/temp', ec_prcp_anom_filename)
+precip_anomaly_percent.to_netcdf(ec_prcp_anom_local_file_path)
+
 ## 拟合函数SPEI
 import xarray as xr
 import numpy as np
@@ -401,12 +444,6 @@ D_hist = climate_cropped['tp'] - climate_cropped['pet']
 D_pred = combined_ds['total_precipitation'] - combined_ds['potential_evapotranspiration']
 D_pred = D_pred.rename({'latitude': 'lat', 'longitude': 'lon'})
 
-# 3. 自定义函数计算周号（按照固定的周定义：1月1-7日为第1周，1月8-14日为第2周...）
-def get_week_of_year(date):
-    # 计算一年中的周数，第一周为1月1-7日
-    day_of_year = date.dt.dayofyear
-    return ((day_of_year - 1) // 7) + 1
-
 # 只计算第4周及之后的SPEI（即预测部分的SPEI）
 start_pred_idx = 3  # 从第4个时间点开始计算SPEI
 spei_pred_list = []
@@ -510,13 +547,26 @@ from utils import plot
 from matplotlib import font_manager
 import os
 
-font_path = "/usr/share/fonts/arial/ARIAL.TTF"
-font_manager.fontManager.addfont(font_path)
-font_name = font_manager.FontProperties(fname=font_path).get_name()
-plt.rcParams['font.family'] = font_name
+try:
+    # 尝试直接设置为Arial
+    plt.rcParams['font.family'] = 'Arial'
+    # 检查Arial是否可用
+    if 'Arial' not in set(f.name for f in font_manager.fontManager.ttflist):
+        raise ValueError("Arial not found in system fonts.")
+except Exception:
+    # 如果Arial不可用，则加载指定路径的字体
+    font_path = "/usr/share/fonts/arial/ARIAL.TTF"
+    font_manager.fontManager.addfont(font_path)
+    font_name = font_manager.FontProperties(fname=font_path).get_name()
+    plt.rcParams['font.family'] = font_name
 
 
 # 4. 选取中国区域
+china_precip_anomaly = precip_anomaly_percent.sel(
+    lon=slice(70, 140),
+    lat=slice(55, 15)
+)
+
 china_spei = spei_pred.sel(
     lon=slice(70, 140),
     lat=slice(55, 15)
@@ -525,7 +575,70 @@ china_spei = spei_pred.sel(
 # 5. 读取中国边界shapefile
 china_shp = gpd.read_file('data/china.shp')
 
-# 6. 设定色标和范围
+# 6. ECMWF降水距平百分比可视化
+precip_vmin, precip_vmax = -100, 100
+precip_levels = np.linspace(precip_vmin, precip_vmax, 11)
+precip_norm = colors.Normalize(vmin=precip_vmin, vmax=precip_vmax)
+precip_cmap = cmaps.drought_severity_r
+precip_title_prefix = 'ECMWF-S2S'
+
+fig_precip = plt.figure(figsize=(42, 28))
+axes_precip = []
+for i in range(6):
+    ax = fig_precip.add_subplot(2, 3, i + 1, projection=ccrs.LambertConformal(
+        central_longitude=105,
+        central_latitude=40,
+        standard_parallels=(25.0, 47.0)
+    ))
+    axes_precip.append(ax)
+
+precip_mappable = None
+for t in range(6):
+    ax = axes_precip[t]
+    current_data = china_precip_anomaly.isel(time=t)
+    ds_t = salem.DataArrayAccessor(current_data)
+    masked_data_t = ds_t.roi(shape=china_shp)
+
+    precip_mappable = plot.one_map_china(
+        masked_data_t,
+        ax,
+        cmap=precip_cmap,
+        levels=precip_levels,
+        norm=precip_norm,
+        mask_ocean=False,
+        add_coastlines=True,
+        add_land=False,
+        add_river=True,
+        add_lake=True,
+        add_stock=False,
+        add_gridlines=True,
+        colorbar=False,
+        plotfunc="pcolormesh"
+    )
+
+    ax2 = fig_precip.add_axes([0.222 + (t % 3) * 0.291, 0.0500 + (1 - t // 3) * 0.4800, 0.06, 0.09],
+                               projection=ccrs.LambertConformal(
+                                   central_longitude=105,
+                                   central_latitude=40,
+                                   standard_parallels=(25.0, 47.0)
+                               ))
+    plot.sub_china_map(masked_data_t, ax2, cmap=precip_cmap, levels=precip_levels, add_coastlines=False, add_land=False)
+
+    current_time = china_precip_anomaly.time.values[t]
+    start_date = np.datetime_as_string(current_time - np.timedelta64(6, 'D'), unit='D').replace('-', '')
+    end_date = np.datetime_as_string(current_time, unit='D').replace('-', '')
+    ax.set_title(f'{precip_title_prefix} Precip Anom {start_date}-{end_date}', fontsize=24, fontfamily='Arial')
+
+precip_cbar_ax = fig_precip.add_axes([0.88, 0.15, 0.01, 0.7])
+precip_cbar = fig_precip.colorbar(precip_mappable, cax=precip_cbar_ax)
+precip_cbar.set_label('Precipitation Anomaly (%)', fontsize=24)
+precip_cbar.ax.tick_params(labelsize=24)
+
+fig_precip.subplots_adjust(left=0.025, right=0.85, top=0.9, bottom=0.05, wspace=0.2, hspace=0.3)
+mpu.set_map_layout(axes_precip, width=80)
+plt.show()
+
+# 7. SPEI绘图设定
 vmin, vmax = -2, 2
 unit_label = ''
 title_prefix = 'ECMWF-S2S'
@@ -641,26 +754,31 @@ def save_and_upload_figure(fig, local_file_path, ftp_host, ftp_user, ftp_passwor
         return False
 
 
-# 构建文件名（使用第一周的开始日期和最后一周的结束日期）
+# 构建EC降水距平百分比和SPEI的文件名（使用第一周的开始日期和最后一周的结束日期）
 start_date = np.datetime_as_string(china_spei.time.values[0] - np.timedelta64(6, 'D'), unit='D')
 end_date = np.datetime_as_string(china_spei.time.values[-1], unit='D')
-filename = f'EC_spei1_forecast_{start_date}_{end_date}.png'
-local_file_path = os.path.join('../../data', filename)
+
+ec_prcp_fig_filename = f'EC_PrcpAnomPercent_forecast_{start_date}_{end_date}.png'
+ec_prcp_fig_local_path = os.path.join('Z:/Data/temp/data', ec_prcp_fig_filename)
+
+spei_fig_filename = f'EC_spei1_forecast_{start_date}_{end_date}.png'
+spei_fig_local_path = os.path.join('Z:/Data/temp/data', spei_fig_filename)
 
 # 保存并上传图片
 ftp_host = "10.168.39.193"
 ftp_user = "Longhao_WANG"
 ftp_password = "123456789"  # 请替换为实际的密码
-ftp_directory = '/Projects/data_NRT/Canglong/figure'
+ftp_directory_fig = '/Projects/data_NRT/Canglong/figure'
 
-success = save_and_upload_figure(fig, local_file_path, ftp_host, ftp_user, ftp_password, ftp_directory)
+success_precip_fig = save_and_upload_figure(fig_precip, ec_prcp_fig_local_path, ftp_host, ftp_user, ftp_password, ftp_directory_fig)
+success = save_and_upload_figure(fig, spei_fig_local_path, ftp_host, ftp_user, ftp_password, ftp_directory_fig)
 
 input_end_date = datetime.strptime(demo_end_time, '%Y-%m-%d')
 start_date1 = input_end_date + timedelta(days=1)
 end_date = input_end_date + timedelta(days=6*7)
-filename = f'../../data/EC_spei1_forecast_{start_date1.strftime("%Y-%m-%d")}_{end_date.strftime("%Y-%m-%d")}.nc'
+filename = f'Z:/Data/temp/data/EC_spei1_forecast_{start_date1.strftime("%Y-%m-%d")}_{end_date.strftime("%Y-%m-%d")}.nc'
 spei_pred.to_netcdf(filename)
-local_file_path = os.path.join('../../data', filename)
+local_file_path = os.path.join('Z:/Data/temp', filename)
 ftp_directory = '/Projects/data_NRT/Canglong'
 
 def save_and_upload_dataset(dataset, local_file_path, ftp_host, ftp_user, ftp_password, ftp_directory):
@@ -705,7 +823,17 @@ def save_and_upload_dataset(dataset, local_file_path, ftp_host, ftp_user, ftp_pa
         print(f"Error saving and uploading file: {e}")
         return False
     
-# 保存并上传数据
+# 保存并上传降水距平百分比数据
+success_ec_prcp = save_and_upload_dataset(
+    dataset=precip_anomaly_percent,
+    local_file_path=ec_prcp_anom_local_file_path,
+    ftp_host=ftp_host,
+    ftp_user=ftp_user,
+    ftp_password=ftp_password,
+    ftp_directory=ftp_directory
+)
+
+# 保存并上传SPEI数据
 success = save_and_upload_dataset(
     dataset=spei_pred,
     local_file_path=local_file_path,

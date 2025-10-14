@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-"""
-区域预报检验：基于NAS数据和shapefile区域裁剪
-- 支持任意shapefile区域裁剪
-- 使用salem进行NC文件的区域裁剪
-- 基于hindcast_NAS.py架构
-"""
-
 import xarray as xr
 import numpy as np
 import matplotlib.pyplot as plt
@@ -20,15 +12,16 @@ from ftplib import FTP
 import tempfile
 import os
 import geopandas as gpd
+os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 
 # 验证关键参数配置 - 修改为与现有ECMWF文件匹配的日期
-demo_start_time = '2025-08-06'
-demo_end_time = '2025-08-19'
-forecast_start_week = 33
-hindcast_start_week = 32
+demo_start_time = '2025-09-24'
+demo_end_time = '2025-10-07'
+forecast_start_week = 40
+hindcast_start_week = 39
 
 # 区域配置 - 默认使用中国shapefile，可以自定义
-SHAPEFILE_PATH = '/home/lhwang/Desktop/CanglongPhysics/code/data/china.shp'
+SHAPEFILE_PATH = 'data/china.shp'
 REGION_NAME = 'china'  # 可修改为其他区域名称
 
 # Nature风格绘图配置
@@ -43,7 +36,7 @@ def setup_nature_style():
             plt.rcParams['font.family'] = font_name
     except:
         # 如果找不到Arial，使用系统默认字体
-        plt.rcParams['font.family'] = 'DejaVu Sans'
+        plt.rcParams['font.family'] = 'Arial'
     
     # Nature风格参数
     plt.rcParams.update({
@@ -82,11 +75,11 @@ def setup_nature_style():
 setup_nature_style()
 
 # 本地数据路径
-local_data_dir = Path('/home/lhwang/Desktop/data')
+local_data_dir = Path('Z:/Data/temp')
 hind_obs_dir = local_data_dir / 'hind_obs'
 hind_obs_dir.mkdir(parents=True, exist_ok=True)
 # 使用绝对路径确保文件保存到正确位置
-figures_dir = Path('/home/lhwang/Desktop/CanglongPhysics/figures/hindcast_region')
+figures_dir = Path('Z:/Data/temp/figures/hindcast_region')
 figures_dir.mkdir(parents=True, exist_ok=True)
 
 # NAS连接配置
@@ -459,8 +452,7 @@ def load_all_data_from_nas_with_shapefile():
     else:
         print("从NAS成功获取观测数据")
         obs_data_full = xr.open_dataset(obs_temp_file)
-        # 清理临时文件
-        os.unlink(obs_temp_file)
+
     
     # 使用shapefile裁剪观测数据
     print("使用shapefile裁剪观测数据...")

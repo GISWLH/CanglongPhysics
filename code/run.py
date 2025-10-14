@@ -1,5 +1,5 @@
-demo_start_time = '2025-08-06'
-demo_end_time = '2025-08-19'
+demo_start_time = '2025-09-24'
+demo_end_time = '2025-10-07'
 data_inner_steps = 24
 import torch
 import numpy as np
@@ -12,7 +12,6 @@ import cartopy.feature as cfeature
 import gcsfs
 import zarr
 import xarray
-
 # 设置滚动预报的周数
 forecast_weeks = 6  # 预测未来6周
 
@@ -129,6 +128,24 @@ ordered_var_stats = {
     }
 }
 
+var_mapping = {
+    'large_scale_rain_rate': 'lsrr',
+    'convective_rain_rate': 'crr',
+    'total_column_cloud_ice_water': 'tciw',
+    'total_cloud_cover': 'tcc',
+    'top_net_solar_radiation_clear_sky': 'tsrc',
+    '10m_u_component_of_wind': 'u10',
+    '10m_v_component_of_wind': 'v10',
+    '2m_dewpoint_temperature': 'd2m',
+    '2m_temperature': 't2m',
+    'surface_latent_heat_flux': 'surface_latent_heat_flux',
+    'surface_sensible_heat_flux': 'surface_sensible_heat_flux',
+    'surface_pressure': 'sp',
+    'volumetric_soil_water_layer': 'swvl',
+    'mean_sea_level_pressure': 'msl',
+    'sea_ice_cover': 'siconc',
+    'sea_surface_temperature': 'sst'
+}        
 
 ds_surface = xarray.open_zarr(
     'gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3',
@@ -145,6 +162,8 @@ surface_full_19_1day['volumetric_soil_water_layer'] = (
     surface_full_19_1day['volumetric_soil_water_layer_3'] + 
     surface_full_19_1day['volumetric_soil_water_layer_4']
 )
+
+
 import xarray as xr
 import pandas as pd
 # 更简单的方法：由于数据恰好是2周，直接分成前7天和后7天
@@ -169,24 +188,6 @@ surface_input_weekly_means = weekly_means[['large_scale_rain_rate', 'convective_
 stacked_data = xr.concat([surface_input_weekly_means[var] for var in surface_input_weekly_means.data_vars], 
                          dim=xr.DataArray(list(surface_input_weekly_means.data_vars), dims='variable'))
 
-var_mapping = {
-    'large_scale_rain_rate': 'lsrr',
-    'convective_rain_rate': 'crr',
-    'total_column_cloud_ice_water': 'tciw',
-    'total_cloud_cover': 'tcc',
-    'top_net_solar_radiation_clear_sky': 'tsrc',
-    '10m_u_component_of_wind': 'u10',
-    '10m_v_component_of_wind': 'v10',
-    '2m_dewpoint_temperature': 'd2m',
-    '2m_temperature': 't2m',
-    'surface_latent_heat_flux': 'surface_latent_heat_flux',
-    'surface_sensible_heat_flux': 'surface_sensible_heat_flux',
-    'surface_pressure': 'sp',
-    'volumetric_soil_water_layer': 'swvl',
-    'mean_sea_level_pressure': 'msl',
-    'sea_ice_cover': 'siconc',
-    'sea_surface_temperature': 'sst'
-}
 
 # 准备均值和标准差数组，形状为(16,1,1,1)，可以广播到(16,2,721,1440)
 means = np.array([ordered_var_stats[var_mapping[var]]['mean'] for var in surface_input_weekly_means.data_vars])
@@ -283,6 +284,8 @@ normalized_input_upper_air = normalized_data.reshape(len(upper_air_vars), len(up
                                               len(upper_air_weekly_means.latitude), 
                                               len(upper_air_weekly_means.longitude))
 
+                                    
+
 import torch
 from torch import nn
 import numpy as np
@@ -292,7 +295,7 @@ import sys
 sys.path.append('..')  # 添加上一级目录到路径
 from canglong.earth_position import calculate_position_bias_indices
 from canglong.shift_window import create_shifted_window_mask, partition_windows, reverse_partition
-from canglong.embed import ImageToPatch2D, ImageToPatch3D, ImageToPatch4D
+from canglong.embed_old import ImageToPatch2D, ImageToPatch3D, ImageToPatch4D  
 from canglong.recovery import RecoveryImage2D, RecoveryImage3D, RecoveryImage4D
 from canglong.pad import calculate_padding_3d, calculate_padding_2d
 from canglong.crop import center_crop_2d, center_crop_3d
@@ -838,7 +841,7 @@ import torch
 import numpy as np
 
 # 设置设备
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(f"使用设备: {device}")
 
 # 假设已经有标准化后的输入数据
@@ -851,11 +854,15 @@ input_upper_air_tensor = torch.tensor(normalized_input_upper_air, dtype=torch.fl
 
 print(f"地表输入数据形状: {input_surface_tensor.shape}")  # 应为 [1, 16, 2, 721, 1440]
 print(f"高空输入数据形状: {input_upper_air_tensor.shape}")  # 应为 [1, 7, 4, 2, 721, 1440]
-
+import sys                                                                                  
+import canglong.embed_old as embed_old                                                                                                                                                
+sys.modules['canglong.embed'] = embed_old
+import canglong.recovery_old as recovery_old
+sys.modules['canglong.recovery'] = recovery_old
 # 加载模型
 model_path = '/home/lhwang/Desktop/model/model_epoch_500.pt'  # 使用最佳模型
 print(f"正在从 {model_path} 加载模型...")
-model = torch.load('/home/lhwang/Desktop/model/weather_model_epoch_500.pt', weights_only=False)
+model = torch.load('F:/model/weather_model_epoch_500.pt', map_location=device, weights_only=False)
 
 model.to(device)
 model.eval()
@@ -908,7 +915,6 @@ all_weeks_upper_air_predictions = torch.cat(all_upper_air_predictions, dim=3)  #
 print(f"滚动预报完成。")
 print(f"所有周的地表预测形状: {all_weeks_surface_predictions.shape}")
 print(f"所有周的高空预测形状: {all_weeks_upper_air_predictions.shape}")
-
 # 将预测结果移回CPU并转换为numpy数组
 surface_predictions_np = all_weeks_surface_predictions.cpu().numpy()
 upper_air_predictions_np = all_weeks_upper_air_predictions.cpu().numpy()
@@ -918,9 +924,7 @@ upper_air_predictions_np = all_weeks_upper_air_predictions.cpu().numpy()
 print("可以使用denormalize_surface和denormalize_upper_air函数反标准化预测结果")
 print("完成推理过程")
 
-# 保存预测结果（可选）
-# np.save('surface_predictions.npy', surface_predictions_np)
-# np.save('upper_air_predictions.npy', upper_air_predictions_np)
+
 
 # 准备地表数据的均值和标准差数组，形状为(16,1,1,1)
 surface_means = np.array([ordered_var_stats[var_mapping[var]]['mean'] for var in surface_var_names])
@@ -932,6 +936,7 @@ surface_stds = surface_stds.reshape(-1, 1, 1, 1)
 
 # 使用广播一次性反标准化所有地表数据
 denormalized_surface = surface_predictions_np * surface_stds + surface_means
+
 
 import numpy as np
 import xarray as xr
@@ -1139,18 +1144,16 @@ ftp_user = "Longhao_WANG"
 ftp_password = "123456789"  # 请替换为实际的密码
 
 #示例1：保存surface数据
-local_file_path = os.path.join('../../data', f"canglong_6weeks_{surface_ds.attrs['forecast_start_date']}_{surface_ds.attrs['forecast_end_date']}.nc")
+local_file_path = os.path.join('Z:/Data/temp', f"canglong_6weeks_{surface_ds.attrs['forecast_start_date']}_{surface_ds.attrs['forecast_end_date']}.nc")
 ftp_directory = '/Projects/data_NRT/Canglong'
 success = save_and_upload_dataset(surface_ds, local_file_path, ftp_host, ftp_user, ftp_password, ftp_directory)
-
-
 
 import xarray as xr
 import numpy as np
 
 # Open the dataset
-temp = xr.open_dataset('/data/lhwang/npy/temp.nc', engine='netcdf4')
-climate = xr.open_dataset('/data/lhwang/npy/climate_variables_2000_2023_weekly.nc')
+temp = xr.open_dataset('E:/data/temp.nc', engine='netcdf4')
+climate = xr.open_dataset('E:/data/climate_variables_2000_2023_weekly.nc')
 
 import xarray as xr
 import pandas as pd
@@ -1194,7 +1197,7 @@ start_date = end_date + timedelta(days=1)
 end_date = end_date + timedelta(weeks=6)
 
 # 构建文件名
-filename = f'../../data/canglong_6weeks_{start_date.strftime("%Y-%m-%d")}_{end_date.strftime("%Y-%m-%d")}.nc'
+filename = f'Z:/Data/temp/canglong_6weeks_{start_date.strftime("%Y-%m-%d")}_{end_date.strftime("%Y-%m-%d")}.nc'
 
 # 加载数据集
 surface_ds = xr.open_dataset(filename)
@@ -1247,6 +1250,8 @@ surface_ds['potential_evapotranspiration'] = (('time', 'latitude', 'longitude'),
 
 # 使用列表语法正确提取多个变量
 ds_sub = surface_ds[['total_precipitation', 'potential_evapotranspiration', '2m_temperature']]
+
+
 
 ## 拟合函数SPEI
 import xarray as xr
@@ -1456,9 +1461,9 @@ input_end_date = datetime.strptime(demo_end_time, '%Y-%m-%d')
 start_date1 = input_end_date + timedelta(days=1)
 end_date = input_end_date + timedelta(days=6*7)
 
-filename = f'../../data/spei1_forecast_{start_date1.strftime("%Y-%m-%d")}_{end_date.strftime("%Y-%m-%d")}.nc'
+filename = f'Z:/Data/temp/spei1_forecast_{start_date1.strftime("%Y-%m-%d")}_{end_date.strftime("%Y-%m-%d")}.nc'
 spei_pred.to_netcdf(filename)
-local_file_path = os.path.join('../../data', filename)
+local_file_path = os.path.join('Z:/Data/temp', filename)
 ftp_directory = '/Projects/data_NRT/Canglong'
 
 # 保存并上传数据
@@ -1488,10 +1493,20 @@ from utils import plot
 from matplotlib import font_manager
 import os
 
-font_path = "/usr/share/fonts/arial/ARIAL.TTF"
-font_manager.fontManager.addfont(font_path)
-font_name = font_manager.FontProperties(fname=font_path).get_name()
-plt.rcParams['font.family'] = font_name
+# 优先使用Arial字体，如果找不到则使用指定路径的字体
+import matplotlib
+try:
+    # 尝试直接设置为Arial
+    plt.rcParams['font.family'] = 'Arial'
+    # 检查Arial是否可用
+    if 'Arial' not in set(f.name for f in font_manager.fontManager.ttflist):
+        raise ValueError("Arial not found in system fonts.")
+except Exception:
+    # 如果Arial不可用，则加载指定路径的字体
+    font_path = "/usr/share/fonts/arial/ARIAL.TTF"
+    font_manager.fontManager.addfont(font_path)
+    font_name = font_manager.FontProperties(fname=font_path).get_name()
+    plt.rcParams['font.family'] = font_name
 
 
 # 4. 选取中国区域
@@ -1579,47 +1594,7 @@ import os
 from io import BytesIO
 import matplotlib.pyplot as plt
 
-def upload_to_ftp(ftp_host, ftp_user, ftp_password, local_file_path, ftp_directory):
-    """
-    将文件上传到FTP服务器
-    
-    Parameters:
-    -----------
-    ftp_host : str
-        FTP服务器地址
-    ftp_user : str
-        FTP用户名
-    ftp_password : str
-        FTP密码
-    local_file_path : str
-        本地文件路径
-    ftp_directory : str
-        FTP目标目录
-    """
-    try:
-        # 连接到FTP服务器
-        ftp = ftplib.FTP(ftp_host)
-        ftp.login(user=ftp_user, passwd=ftp_password)
-        
-        # 切换到目标目录
-        ftp.cwd(ftp_directory)
-        
-        # 获取文件名
-        filename = os.path.basename(local_file_path)
-        
-        # 上传文件
-        with open(local_file_path, 'rb') as file:
-            ftp.storbinary(f'STOR {filename}', file)
-        
-        print(f"File {filename} uploaded successfully to {ftp_directory}")
-        
-        # 关闭FTP连接
-        ftp.quit()
-        return True
-        
-    except Exception as e:
-        print(f"Error uploading file: {e}")
-        return False
+
 
 def save_and_upload_figure(fig, local_file_path, ftp_host, ftp_user, ftp_password, ftp_directory):
     """
@@ -1667,7 +1642,7 @@ def save_and_upload_figure(fig, local_file_path, ftp_host, ftp_user, ftp_passwor
 start_date = np.datetime_as_string(china_spei.time.values[0] - np.timedelta64(6, 'D'), unit='D')
 end_date = np.datetime_as_string(china_spei.time.values[-1], unit='D')
 filename = f'spei1_forecast_{start_date}_{end_date}.png'
-local_file_path = os.path.join('../../data', filename)
+local_file_path = os.path.join('Z:/Data/temp', filename)
 
 # 保存并上传图片
 ftp_host = "10.168.39.193"
@@ -1682,12 +1657,21 @@ import xarray as xr
 import numpy as np
 
 # Open the dataset
-temp = xr.open_dataset('/data/lhwang/npy/temp.nc', engine='netcdf4')
-climate = xr.open_dataset('/data/lhwang/npy/climate_variables_2000_2023_weekly.nc')
+temp = xr.open_dataset('E:/data/temp.nc', engine='netcdf4')
+climate = xr.open_dataset('E:/data/climate_variables_2000_2023_weekly.nc')
+
 
 # 加载预测数据集
 import xarray as xr
 surface_ds = surface_ds
+# 构建文件名
+end_date = datetime.strptime(demo_end_time, '%Y-%m-%d')
+start_date = end_date + timedelta(days=1)
+end_date = end_date + timedelta(weeks=6)
+filename = f'Z:/Data/temp/canglong_6weeks_{start_date.strftime("%Y-%m-%d")}_{end_date.strftime("%Y-%m-%d")}.nc'
+
+# 加载数据集
+surface_ds = xr.open_dataset(filename)
 
 # 处理温度数据 - 从开尔文转换为摄氏度
 surface_ds['2m_temperature'] = surface_ds['2m_temperature'] - 273.15
@@ -1787,13 +1771,15 @@ input_end_date = datetime.strptime(demo_end_time, '%Y-%m-%d')
 start_date1 = input_end_date + timedelta(days=1)
 end_date = input_end_date + timedelta(days=6*7)
 
-filename = f'../../data/PrcpAnomPercent_forecast_{start_date1.strftime("%Y-%m-%d")}_{end_date.strftime("%Y-%m-%d")}.nc'
+filename = f'Z:/Data/temp/PrcpAnomPercent_forecast_{start_date1.strftime("%Y-%m-%d")}_{end_date.strftime("%Y-%m-%d")}.nc'
 precip_anomaly_percent.to_netcdf(filename)
 
 
-local_file_path = os.path.join('../../data', f'PrcpAnomPercent_forecast_{start_date1.strftime("%Y-%m-%d")}_{end_date.strftime("%Y-%m-%d")}.nc')
+local_file_path = os.path.join('Z:/Data/temp', f'PrcpAnomPercent_forecast_{start_date1.strftime("%Y-%m-%d")}_{end_date.strftime("%Y-%m-%d")}.nc')
 ftp_directory = '/Projects/data_NRT/Canglong'
 success = save_and_upload_dataset(precip_anomaly_percent, local_file_path, ftp_host, ftp_user, ftp_password, ftp_directory)
+
+
 
 # 计算降水距平百分比并可视化中国区域6周降水距平百分比
 import xarray as xr
@@ -1811,10 +1797,18 @@ from utils import plot
 from matplotlib import font_manager
 import os
 
-font_path = "/usr/share/fonts/arial/ARIAL.TTF"
-font_manager.fontManager.addfont(font_path)
-font_name = font_manager.FontProperties(fname=font_path).get_name()
-plt.rcParams['font.family'] = font_name
+try:
+    # 尝试直接设置为Arial
+    plt.rcParams['font.family'] = 'Arial'
+    # 检查Arial是否可用
+    if 'Arial' not in set(f.name for f in font_manager.fontManager.ttflist):
+        raise ValueError("Arial not found in system fonts.")
+except Exception:
+    # 如果Arial不可用，则加载指定路径的字体
+    font_path = "/usr/share/fonts/arial/ARIAL.TTF"
+    font_manager.fontManager.addfont(font_path)
+    font_name = font_manager.FontProperties(fname=font_path).get_name()
+    plt.rcParams['font.family'] = font_name
 
 # 4. 选取中国区域
 china_precip_anomaly = precip_anomaly_percent.sel(
@@ -1903,7 +1897,7 @@ mpu.set_map_layout(axes, width=80)
 start_date = np.datetime_as_string(china_spei.time.values[0] - np.timedelta64(6, 'D'), unit='D')
 end_date = np.datetime_as_string(china_spei.time.values[-1], unit='D')
 filename = f'prcp_anomaly_forecast_{start_date}_{end_date}.png'
-local_file_path = os.path.join('../../data', filename)
+local_file_path = os.path.join('Z:/Data/temp/data', filename)
 
 # 保存并上传图片
 ftp_host = "10.168.39.193"
@@ -1912,6 +1906,5 @@ ftp_password = "123456789"  # 请替换为实际的密码
 ftp_directory = '/Projects/data_NRT/Canglong/figure'
 
 success = save_and_upload_figure(fig, local_file_path, ftp_host, ftp_user, ftp_password, ftp_directory)
-
 
 
