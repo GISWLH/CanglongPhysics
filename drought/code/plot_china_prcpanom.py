@@ -1,0 +1,268 @@
+import xarray as xr
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.colors as colors
+import cmaps
+import cartopy.crs as ccrs
+import salem
+import geopandas as gpd
+import mplotutils as mpu
+from utils import plot
+import matplotlib as mpl
+from matplotlib import font_manager
+import warnings
+warnings.filterwarnings('ignore')
+
+# 设置全局字体为 Arial
+try:
+    # 尝试直接设置为Arial
+    plt.rcParams['font.family'] = 'Arial'
+    # 检查Arial是否可用
+    if 'Arial' not in set(f.name for f in font_manager.fontManager.ttflist):
+        raise ValueError("Arial not found in system fonts.")
+except Exception:
+    # 如果Arial不可用，则加载指定路径的字体
+    font_path = "/usr/share/fonts/arial/ARIAL.TTF"
+    font_manager.fontManager.addfont(font_path)
+    font_name = font_manager.FontProperties(fname=font_path).get_name()
+    plt.rcParams['font.family'] = font_name
+
+# 设置Nature风格参数
+plt.style.use('seaborn-v0_8-talk')
+plt.rcParams.update({
+    'font.family': 'Arial',
+    'font.size': 10,
+    'axes.titlesize': 11,
+    'axes.labelsize': 10,
+    'xtick.labelsize': 9,
+    'ytick.labelsize': 9,
+    'legend.fontsize': 9,
+    'figure.dpi': 600,
+    'figure.figsize': (6, 4),
+    'lines.linewidth': 1.5,
+    'axes.linewidth': 1.0,
+    'axes.spines.left': True,
+    'axes.spines.bottom': True,
+    'axes.spines.top': True,
+    'axes.spines.right': True,
+    'axes.edgecolor': '#454545',
+    'xtick.direction': 'in',
+    'ytick.direction': 'in',
+    'xtick.major.size': 8,
+    'ytick.major.size': 8,
+    'xtick.minor.size': 4,
+    'ytick.minor.size': 4,
+    'xtick.major.width': 1.0,
+    'ytick.major.width': 1.0,
+    'xtick.minor.width': 1.0,
+    'ytick.minor.width': 1.0,
+    'xtick.color': '#454545',
+    'ytick.color': '#454545',
+    'savefig.bbox': 'tight',
+    'savefig.transparent': False
+})
+mpl.rcParams['svg.fonttype'] = 'none'
+mpl.rcParams['svg.hashsalt'] = 'hello'
+
+print("Loading climatology data...")
+# 加载气候态数据（24年*52周=1248个时间步）
+clim_path = 'E:/data/climate_variables_2000_2023_weekly.nc'
+ds_clim = xr.open_dataset(clim_path)
+
+# 计算每个时间步的年中周数作为DataArray
+week_of_year = ds_clim['time'].dt.isocalendar().week
+
+# 计算气候态：每年同一周的平均值
+print("Calculating weekly climatology (mean over 2000-2023)...")
+tp_clim = ds_clim['tp'].groupby(week_of_year).mean('time')
+
+print(f"Climatology shape: {tp_clim.shape}")
+print(f"Week range: {tp_clim.week.min().values} to {tp_clim.week.max().values}")
+
+# 目标日期
+target_date = '2022-06-25'
+
+# 1. 读取中国边界shapefile
+china_shp = gpd.read_file('data/china.shp')
+
+# 2. 打开数据集并筛选2022-06-25这一天的数据
+lead1 = xr.open_dataset('Z:/Data/hindcast_2022_2023/hindcast_2022_2023_lead1.nc')['total_precipitation'].sel(time=target_date).rename({'latitude': 'lat', 'longitude': 'lon'})
+lead2 = xr.open_dataset('Z:/Data/hindcast_2022_2023/hindcast_2022_2023_lead2.nc')['total_precipitation'].sel(time=target_date).rename({'latitude': 'lat', 'longitude': 'lon'})
+lead3 = xr.open_dataset('Z:/Data/hindcast_2022_2023/hindcast_2022_2023_lead3.nc')['total_precipitation'].sel(time=target_date).rename({'latitude': 'lat', 'longitude': 'lon'})
+lead4 = xr.open_dataset('Z:/Data/hindcast_2022_2023/hindcast_2022_2023_lead4.nc')['total_precipitation'].sel(time=target_date).rename({'latitude': 'lat', 'longitude': 'lon'})
+lead5 = xr.open_dataset('Z:/Data/hindcast_2022_2023/hindcast_2022_2023_lead5.nc')['total_precipitation'].sel(time=target_date).rename({'latitude': 'lat', 'longitude': 'lon'})
+lead6 = xr.open_dataset('Z:/Data/hindcast_2022_2023/hindcast_2022_2023_lead6.nc')['total_precipitation'].sel(time=target_date).rename({'latitude': 'lat', 'longitude': 'lon'})
+
+# 观测数据
+obs = xr.open_dataset('Z:/Data/hindcast_2022_2023/hindcast_2022_2023_lead1.nc')['total_precipitation_obs'].sel(time=target_date).rename({'latitude': 'lat', 'longitude': 'lon'})
+
+# 3. 将6个lead数据放入列表
+lead_data = [lead1, lead2, lead3, lead4, lead5, lead6]
+
+# 4. 计算降水距平百分比
+def calculate_precipitation_anomaly_percentage(data, climatology, target_date):
+    """计算降水距平百分比"""
+    # 获取目标日期的周数
+    target_week = np.datetime64(target_date).astype('datetime64[D]')
+    # 简化的周数计算（假设target_date是周日）
+    week_num = 26  # 2022-06-25是第26周
+    
+    # 获取对应周的气候态值
+    clim_week = climatology.sel(week=week_num)
+    
+    # 计算距平百分比: (观测值 - 气候态) / 气候态 * 100%
+    anomaly_percentage = ((data - clim_week) / clim_week) * 100
+    
+    return anomaly_percentage
+
+# 计算每个lead的降水距平百分比
+china_anomaly_data = []
+for i, lead in enumerate(lead_data):
+    print(f"Processing Lead {i+1}...")
+    # 计算距平百分比
+    anomaly = calculate_precipitation_anomaly_percentage(lead, tp_clim, target_date)
+    
+    # 选取中国区域
+    china_anomaly = anomaly.sel(
+        lon=slice(70, 140),
+        lat=slice(55, 15)
+    )
+    china_anomaly_data.append(china_anomaly)
+
+# 计算观测的降水距平百分比
+print("Processing Observation...")
+obs_anomaly = calculate_precipitation_anomaly_percentage(obs, tp_clim, target_date)
+china_obs_anomaly = obs_anomaly.sel(
+    lon=slice(70, 140),
+    lat=slice(55, 15)
+)
+
+# 5. 设定色标和范围（适用于降水距平百分比）
+vmin, vmax = -100, 100  # 降水距平百分比范围
+unit_label = '%'
+title_prefix = 'CAS-Canglong'
+data_cmap = cmaps.BlueWhiteOrangeRed_r  # 使用蓝-白-红颜色图
+
+# 6. 创建图形和投影（7个子图：6个lead + 1个观测）
+fig = plt.figure(figsize=(49, 28))  # 调整为7个子图的大小
+axes = []
+for i in range(7):
+    ax = fig.add_subplot(2, 4, i+1, projection=ccrs.LambertConformal(
+        central_longitude=105,
+        central_latitude=40,
+        standard_parallels=(25.0, 47.0)
+    ))
+    axes.append(ax)
+
+levels = np.linspace(vmin, vmax, 21)  # 增加分级以获得更平滑的显示
+norm = colors.Normalize(vmin=vmin, vmax=vmax)
+
+# 7. 绘制6个lead时间的数据
+mappable = None
+for t in range(6):
+    ax = axes[t]
+    current_data = china_anomaly_data[t]
+    
+    # 使用salem创建掩膜，只显示中国陆地
+    ds_t = salem.DataArrayAccessor(current_data)
+    masked_data_t = ds_t.roi(shape=china_shp)
+    
+    # 绘图
+    mappable = plot.one_map_china(
+        masked_data_t, 
+        ax, 
+        cmap=data_cmap, 
+        levels=levels,
+        norm=norm,
+        mask_ocean=False, 
+        add_coastlines=True, 
+        add_land=False, 
+        add_river=True, 
+        add_lake=True, 
+        add_stock=False, 
+        add_gridlines=True, 
+        colorbar=False, 
+        plotfunc="pcolormesh"
+    )
+    
+    # 添加小地图（九段线）
+    ax2 = fig.add_axes([0.192 + (t % 4) * 0.195, 0.0500 + (1 - t // 4) * 0.4800, 0.05, 0.075], 
+                      projection=ccrs.LambertConformal(
+                          central_longitude=105,
+                          central_latitude=40,
+                          standard_parallels=(25.0, 47.0)
+                      ))
+    plot.sub_china_map(masked_data_t, ax2, cmap=data_cmap, add_coastlines=False, add_land=False)
+    
+    # 时间标签
+    start_date = '20220625'
+    lead_start = np.datetime64('2022-06-25') + np.timedelta64(t*7, 'D')
+    lead_end = lead_start + np.timedelta64(6, 'D')
+    start_str = str(lead_start).replace('-', '')
+    end_str = str(lead_end).replace('-', '')
+    
+    ax.set_title(f'{title_prefix} Lead{t+1} for {start_str}-{end_str}', fontsize=20, fontfamily='Arial')
+
+# 8. 绘制观测数据
+ax = axes[6]
+current_data = china_obs_anomaly
+
+# 使用salem创建掩膜，只显示中国陆地
+ds_t = salem.DataArrayAccessor(current_data)
+masked_data_t = ds_t.roi(shape=china_shp)
+
+# 绘图
+mappable = plot.one_map_china(
+    masked_data_t, 
+    ax, 
+    cmap=data_cmap, 
+    levels=levels,
+    norm=norm,
+    mask_ocean=False, 
+    add_coastlines=True, 
+    add_land=False, 
+    add_river=True, 
+    add_lake=True, 
+    add_stock=False, 
+    add_gridlines=True, 
+    colorbar=False, 
+    plotfunc="pcolormesh"
+)
+
+# 添加小地图（九段线）
+ax2 = fig.add_axes([0.192 + (6 % 4) * 0.195, 0.0500 + (1 - 6 // 4) * 0.4800, 0.05, 0.075], 
+                  projection=ccrs.LambertConformal(
+                      central_longitude=105,
+                      central_latitude=40,
+                      standard_parallels=(25.0, 47.0)
+                  ))
+plot.sub_china_map(masked_data_t, ax2, cmap=data_cmap, add_coastlines=False, add_land=False)
+
+# 设置标题
+ax.set_title('Observation for 20220619-20220625', fontsize=20, fontfamily='Arial')
+
+# 9. 使用mpu添加色标
+cbar_ax = fig.add_axes([0.88, 0.15, 0.01, 0.7])  # 调整色标位置和大小
+cbar = fig.colorbar(mappable, cax=cbar_ax)
+cbar.set_label('Precipitation Anomaly (%)', fontsize=20)
+cbar.ax.tick_params(labelsize=20)  # 设置刻度标签字体大小
+
+# 10. 调整布局
+plt.subplots_adjust(left=0.025, right=0.85, top=0.9, bottom=0.05, wspace=0.2, hspace=0.3)
+mpu.set_map_layout(axes, width=80)
+
+# 11. 保存图片
+output_path = 'figures/precipitation_anomaly_percentage_20220625.png'
+plt.savefig(output_path, dpi=300, bbox_inches='tight')
+print(f"Figure saved to: {output_path}")
+
+# 也保存为SVG格式
+output_path_svg = 'figures/precipitation_anomaly_percentage_20220625.svg'
+plt.savefig(output_path_svg, format='svg', bbox_inches='tight')
+print(f"Figure saved to: {output_path_svg}")
+
+plt.show()
+
+# 关闭数据集
+ds_clim.close()
+print("Processing completed!")

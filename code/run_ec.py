@@ -15,8 +15,8 @@ import os
 from io import BytesIO
 import xarray as xr
 
-demo_start_time = '2025-09-24'
-demo_end_time = '2025-10-07'
+demo_start_time = '2025-10-18'
+demo_end_time = '2025-11-01'
 
 def upload_to_ftp(ftp_host, ftp_user, ftp_password, local_file_path, ftp_directory):
     """
@@ -96,9 +96,7 @@ data_prcp = rioxarray.open_rasterio(temp_paths[0])
 data_d2m = rioxarray.open_rasterio(temp_paths[1]) 
 data_t2m = rioxarray.open_rasterio(temp_paths[2])
 
-# 删除临时文件
-for temp_path in temp_paths:
-    os.unlink(temp_path)
+
 
 
 import xarray as xr
@@ -529,7 +527,7 @@ spei_pred = spei_pred.assign_coords(time=D_pred.time[start_pred_idx:])
 plt.figure(figsize=(10,4))
 spei_pred.isel(time=0).plot(vmin=-2, vmax=2, cmap='RdBu')
 plt.title(f"SPEI-4 {str(spei_pred.time.values[0])[:10]}")
-plt.show()
+#plt.show()
 
 # 计算 SPEI 并可视化中国区域6周SPEI
 import xarray as xr
@@ -636,7 +634,7 @@ precip_cbar.ax.tick_params(labelsize=24)
 
 fig_precip.subplots_adjust(left=0.025, right=0.85, top=0.9, bottom=0.05, wspace=0.2, hspace=0.3)
 mpu.set_map_layout(axes_precip, width=80)
-plt.show()
+#plt.show()
 
 # 7. SPEI绘图设定
 vmin, vmax = -2, 2
@@ -709,7 +707,7 @@ cbar.ax.tick_params(labelsize=24)  # 设置刻度标签字体大小
 # 调整布局
 plt.subplots_adjust(left=0.025, right=0.85, top=0.9, bottom=0.05, wspace=0.2, hspace=0.3)
 mpu.set_map_layout(axes, width=80)
-plt.show()
+#plt.show()
 
 def save_and_upload_figure(fig, local_file_path, ftp_host, ftp_user, ftp_password, ftp_directory):
     """

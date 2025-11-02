@@ -15,10 +15,10 @@ import geopandas as gpd
 os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 
 # 验证关键参数配置 - 修改为与现有ECMWF文件匹配的日期
-demo_start_time = '2025-09-24'
-demo_end_time = '2025-10-07'
-forecast_start_week = 40
-hindcast_start_week = 39
+demo_start_time = '2025-10-08'
+demo_end_time = '2025-10-21'
+forecast_start_week = 42
+hindcast_start_week = 41
 
 # 区域配置 - 默认使用中国shapefile，可以自定义
 SHAPEFILE_PATH = 'data/china.shp'

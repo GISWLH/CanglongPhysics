@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(conda run:*)",
-      "Bash(python test:*)"
+      "Bash(python test:*)",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []
