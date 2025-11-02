@@ -3,7 +3,9 @@
     "allow": [
       "Bash(conda run:*)",
       "Bash(python test:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push)"
     ],
     "deny": [],
     "ask": []
