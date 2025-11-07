@@ -1,7 +1,7 @@
-import torch
+
 import numpy as np
 import matplotlib.pyplot as plt
-from torch.utils.data import Dataset, DataLoader
+
 import os
 from tqdm import tqdm
 import cartopy.crs as ccrs
@@ -15,8 +15,8 @@ import os
 from io import BytesIO
 import xarray as xr
 
-demo_start_time = '2025-10-18'
-demo_end_time = '2025-11-01'
+demo_start_time = '2025-10-15'
+demo_end_time = '2025-10-28'
 
 def upload_to_ftp(ftp_host, ftp_user, ftp_password, local_file_path, ftp_directory):
     """
