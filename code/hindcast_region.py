@@ -15,8 +15,8 @@ import geopandas as gpd
 os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 
 # 验证关键参数配置 - 修改为与现有ECMWF文件匹配的日期
-demo_start_time = '2025-10-15'
-demo_end_time = '2025-10-28'
+demo_start_time = '2025-10-22'
+demo_end_time = '2025-11-04'
 forecast_start_week = 43
 hindcast_start_week = 42
 
