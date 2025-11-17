@@ -110,16 +110,16 @@ class WindDirectionProcessor(nn.Module):
         """
         B, _, _, _, H, W = upper_air.shape
         
-        # 提取高空u/v风场数据 (第3,4层对应索引2,3)
+        # 提取高空u/v风场数据
         # upper_air shape: (B, 7, 5, 2, 721, 1440)
         # 提取第3,4层: upper_air[:, :, 2:4, :, :, :]
-        upper_u = upper_air[:, :, 2, :, :, :]  # (B, 7, 2, 721, 1440)
-        upper_v = upper_air[:, :, 3, :, :, :]  # (B, 7, 2, 721, 1440)
+        upper_u = upper_air[:, :, 3, :, :, :]  # (B, 7, 2, 721, 1440)
+        upper_v = upper_air[:, :, 4, :, :, :]  # (B, 7, 2, 721, 1440)
         
-        # 提取表面10m u/v风场数据 (第5,6层对应索引4,5)
+        # 提取表面10m u/v风场数据 
         # surface shape: (B, 17, 2, 721, 1440)
-        surface_u = surface[:, 4, :, :, :]  # (B, 2, 721, 1440)
-        surface_v = surface[:, 5, :, :, :]  # (B, 2, 721, 1440)
+        surface_u = surface[:, 7, :, :, :]  # (B, 2, 721, 1440)
+        surface_v = surface[:, 8, :, :, :]  # (B, 2, 721, 1440)
         
         # 合并高空和表面风场数据 (取时间维度的平均)
         # 对于高空数据，取所有压力层的平均

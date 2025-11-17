@@ -446,25 +446,19 @@ class Canglong(nn.Module):
     def __init__(self, embed_dim=96, num_heads=(8, 16, 16, 8), window_size=(2, 6, 12)):
         super().__init__()
         drop_path = np.linspace(0, 0.2, 8).tolist()
-        self.patchembed2d = ImageToPatch2D(
-            img_dims=(721, 1440),
-            patch_dims=(4, 4), # 8, 8
-            in_channels=4,
-            out_channels=embed_dim,
-        )
         self.patchembed3d = ImageToPatch3D(
-            img_dims=(14, 721, 1440),
+            img_dims=(26, 721, 1440),
             patch_dims=(1, 4, 4),
-            in_channels=14,
+            in_channels=26,
             out_channels=embed_dim
         )
         self.patchembed4d = ImageToPatch4D(
-            img_dims=(7, 5, 2, 721, 1440),
+            img_dims=(10, 5, 2, 721, 1440),
             patch_dims=(2, 2, 4, 4),
-            in_channels=7,
+            in_channels=10,
             out_channels=embed_dim
         )
-        self.encoder3d = Encoder(image_channels=17, latent_dim=96)
+        self.encoder3d = Encoder(image_channels=26, latent_dim=96)
 
         self.layer1 = BasicLayer(
             dim=embed_dim,
@@ -501,16 +495,16 @@ class Canglong(nn.Module):
             drop_path=drop_path[:2]
         )
         self.patchrecovery2d = RecoveryImage2D((721, 1440), (4, 4), 2 * embed_dim, 4) #8, 8
-        self.decoder3d = Decoder(image_channels=17, latent_dim=2 * 96)
-        self.patchrecovery3d = RecoveryImage3D(image_size=(16, 721, 1440), 
+        self.decoder3d = Decoder(image_channels=26, latent_dim=2 * 96)
+        self.patchrecovery3d = RecoveryImage3D(image_size=(21, 721, 1440), 
                                                patch_size=(1, 4, 4), 
                                                input_channels=2 * embed_dim, 
-                                               output_channels=16) #2, 8, 8
-        self.patchrecovery4d = RecoveryImage4D(image_size=(7, 5, 1, 721, 1440), 
+                                               output_channels=21) #2, 8, 8
+        self.patchrecovery4d = RecoveryImage4D(image_size=(10, 5, 1, 721, 1440), 
                                                patch_size=(2, 1, 4, 4), 
                                                input_channels=2 * embed_dim, 
-                                               output_channels=7,
-                                               target_size=(7, 5, 1, 721, 1440))
+                                               output_channels=10,
+                                               target_size=(10, 5, 1, 721, 1440))
         
 
         self.conv_constant = nn.Conv2d(in_channels=64, out_channels=96, kernel_size=5, stride=4, padding=2)
@@ -552,6 +546,7 @@ class Canglong(nn.Module):
         output_upper_air = self.patchrecovery4d(output_upper_air.unsqueeze(3))
         
         return output_surface, output_upper_air
+
 
 
 import torch
@@ -606,7 +601,7 @@ print(f"Using device: {device}")
 
 # 加载数据
 print("Loading data...")
-input_surface, input_upper_air = h5.File('/gz-data/ERA5_2023_weekly.h5')['surface'], h5.File('/gz-data/ERA5_2023_weekly.h5')['upper_air']
+input_surface, input_upper_air = h5.File('/gz-data/ERA5_2023_weekly_new.h5')['surface'], h5.File('/gz-data/ERA5_2023_weekly_new.h5')['upper_air']
 print(f"Surface data shape: {input_surface.shape}") #(52, 17, 721, 1440)
 print(f"Upper air data shape: {input_upper_air.shape}") #(52, 7, 5, 721, 1440)
 
@@ -622,26 +617,23 @@ test_dataset = WeatherDataset(input_surface, input_upper_air, start_idx=valid_en
 
 # 创建数据加载器 - 使用较小的batch size以便于调试
 batch_size = 1  # 小batch size便于调试
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=2)  # 不打乱时间顺序
-valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=16)  # 不打乱时间顺序
+valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=16)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=16)
 
 print(f"Created data loaders with batch size {batch_size}")
 import sys
 sys.path.append('code_v2')
-from convert_dict_to_pytorch_arrays import load_normalization_arrays
+from convert_dict_to_pytorch_arrays_v2 import load_normalization_arrays
 
 # 调用函数获取四个数组
-json = '/home/CanglongPhysics/code_v2/ERA5_1940_2019_combined_mean_std.json'
+json = '/home/CanglongPhysics/code_v2/ERA5_1940_2023_mean_std_v2.json'
 surface_mean, surface_std, upper_mean, upper_std = load_normalization_arrays(json)
 
 
-# 创建模型并加载已有权重，继续训练
-checkpoint_path = '/gz-data/model_v1_150.pth'
+# 创建模型
 model = Canglong()
-state_dict = torch.load(checkpoint_path, map_location='cpu')
-model.load_state_dict(state_dict)
-
+#model = torch.load('/home/CanglongPhysics/checkpoints_v3/model_v1_new.pth')
 # 多GPU训练
 if torch.cuda.device_count() > 1:
     print(f"Using {torch.cuda.device_count()} GPUs!")
@@ -651,14 +643,14 @@ if torch.cuda.device_count() > 1:
 model.to(device)
 
 # 创建优化器和损失函数
-optimizer = optim.Adam(model.parameters(), lr=0.0005)
+optimizer = optim.Adam(model.parameters(), lr=0.0005 * 3)
 criterion = nn.MSELoss()
 
 # 创建保存目录
-save_dir = '/gz-data'
+save_dir = 'checkpoints'
 os.makedirs(save_dir, exist_ok=True)
 
-# 训练参数（在已有权重基础上继续训练 50 个 epoch）
+# 训练参数
 num_epochs = 50
 best_valid_loss = float('inf')
 

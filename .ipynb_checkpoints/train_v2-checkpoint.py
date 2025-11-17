@@ -305,25 +305,19 @@ class CanglongV2(nn.Module):
         # 风向处理器
         self.wind_direction_processor = WindDirectionProcessor(window_size=(4, 4))
         
-        self.patchembed2d = ImageToPatch2D(
-            img_dims=(721, 1440),
-            patch_dims=(4, 4), # 8, 8
-            in_channels=4,
-            out_channels=embed_dim,
-        )
         self.patchembed3d = ImageToPatch3D(
-            img_dims=(14, 721, 1440),
+            img_dims=(26, 721, 1440),
             patch_dims=(1, 4, 4),
-            in_channels=14,
+            in_channels=26,
             out_channels=embed_dim
         )
         self.patchembed4d = ImageToPatch4D(
-            img_dims=(7, 5, 2, 721, 1440),
+            img_dims=(10, 5, 2, 721, 1440),
             patch_dims=(2, 2, 4, 4),
-            in_channels=7,
+            in_channels=10,
             out_channels=embed_dim
         )
-        self.encoder3d = Encoder(image_channels=17, latent_dim=96)
+        self.encoder3d = Encoder(image_channels=26, latent_dim=96)
 
         self.layer1 = BasicLayer(
             dim=embed_dim,
@@ -364,16 +358,16 @@ class CanglongV2(nn.Module):
             use_wind_aware_shift=True  # 启用风向感知的窗口交换
         )
         self.patchrecovery2d = RecoveryImage2D((721, 1440), (4, 4), 2 * embed_dim, 4) #8, 8
-        self.decoder3d = Decoder(image_channels=17, latent_dim=2 * 96)
-        self.patchrecovery3d = RecoveryImage3D(image_size=(16, 721, 1440), 
+        self.decoder3d = Decoder(image_channels=26, latent_dim=2 * 96)
+        self.patchrecovery3d = RecoveryImage3D(image_size=(26, 721, 1440), 
                                                patch_size=(1, 4, 4), 
                                                input_channels=2 * embed_dim, 
-                                               output_channels=16) #2, 8, 8
-        self.patchrecovery4d = RecoveryImage4D(image_size=(7, 5, 1, 721, 1440), 
+                                               output_channels=26) #2, 8, 8
+        self.patchrecovery4d = RecoveryImage4D(image_size=(10, 5, 1, 721, 1440), 
                                                patch_size=(2, 1, 4, 4), 
                                                input_channels=2 * embed_dim, 
-                                               output_channels=7,
-                                               target_size=(7, 5, 1, 721, 1440))
+                                               output_channels=10,
+                                               target_size=(10, 5, 1, 721, 1440))
         
 
         self.conv_constant = nn.Conv2d(in_channels=64, out_channels=96, kernel_size=5, stride=4, padding=2)
@@ -481,13 +475,10 @@ print(f"Using device: {device}")
 
 # 加载数据
 print("Loading data...")
-h5_file = h5.File('/gz-data/ERA5_2023_weekly.h5', 'r')
-input_surface = h5_file['surface'][:]  # (52, 17, 721, 1440)
-input_upper_air = h5_file['upper_air'][:]  # (52, 7, 5, 721, 1440)
-h5_file.close()
+input_surface, input_upper_air = h5.File('/gz-data/ERA5_2023_weekly_new.h5')['surface'], h5.File('/gz-data/ERA5_2023_weekly_new.h5')['upper_air']
+print(f"Surface data shape: {input_surface.shape}") #(52, 26, 721, 1440)
+print(f"Upper air data shape: {input_upper_air.shape}") #(52, 10, 5, 721, 1440)
 
-print(f"Surface data shape: {input_surface.shape}")
-print(f"Upper air data shape: {input_upper_air.shape}")
 
 # 仅使用前28个时间步进行训练
 total_samples = 28
@@ -495,15 +486,15 @@ train_dataset = WeatherDataset(input_surface, input_upper_air, start_idx=0, end_
 
 # 创建数据加载器
 batch_size = 1
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=16)
 
 print(f"Created training loader with batch size {batch_size} and {len(train_dataset)} samples")
 
 sys.path.append('code_v2')
-from convert_dict_to_pytorch_arrays import load_normalization_arrays
+from convert_dict_to_pytorch_arrays_v2 import load_normalization_arrays
 
 # 调用函数获取四个数组
-json = '/home/CanglongPhysics/code_v2/ERA5_1940_2019_combined_mean_std.json'
+json = '/home/CanglongPhysics/code_v2/ERA5_1940_2023_mean_std_v2.json'
 surface_mean_np, surface_std_np, upper_mean_np, upper_std_np = load_normalization_arrays(json)
 
 # 转换为张量并移动到设备
@@ -532,7 +523,7 @@ criterion = nn.MSELoss()
 save_dir = 'checkpoints_v2'
 os.makedirs(save_dir, exist_ok=True)
 
-# 尝试从已有检查点继续训练
+#尝试从已有检查点继续训练
 start_epoch = 0
 latest_checkpoint = None
 checkpoint_files = sorted(Path(save_dir).glob('model_v2_epoch*.pth'),
