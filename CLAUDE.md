@@ -83,6 +83,17 @@ CanglongPhysics 是一个专注于将物理信息添加到AI天气预测模型�
 | 24 | **stl** | Soil Temperature Layer | 土壤温度层 | K | 200-330 |
 | 25 | **swvl** | Volumetric Soil Water Layer | 体积土壤水层 | m³/m³ | 0-1 |
 
+注意后两个是加权变量
+各层厚度：
+d1 = 0.07 m (7 cm)
+d2 = 0.21 m (21 cm)
+d3 = 0.72 m (72 cm)
+d4 = 1.89 m (189 cm)
+总深度 = 2.89 m
+加权公式：
+swvl = (swvl1 * 0.07 + swvl2 * 0.21 + swvl3 * 0.72 + swvl4 * 1.89) / 2.89
+stl = (stl1 * 0.07 + stl2 * 0.21 + stl3 * 0.72 + stl4 * 1.89) / 2.89
+
 **Python数组定义**
 ```python
 surf_vars = ['avg_tnswrf', 'avg_tnlwrf', 'tciw', 'tcc', 'lsrr', 'crr', 'blh',
@@ -216,17 +227,19 @@ levels = [200, 300, 500, 700, 850]  # h5文件中的顺序（从高到低）
 - R: 暂时忽略
 
 ### 2. 能量平衡约束
-反映了海表通过辐射与热通量之间的基本能量平衡：
-σSST^4 = LHF + SHF + tsrc
 
-其中 tsrc 代表总的向下能量通量，即 tsrc = SW_net + LW_↓
+先构建
+$$R_n = \text{mean\_surface\_net\_short\_wave\_radiation\_flux} + \text{mean\_surface\_net\_long\_wave\_radiation\_flux}$$
 
-**变量索引（Surface层）**:
-- SST: sst (索引22) - 海表温度
-- LHF: slhf (索引13) - 表面潜热通量
-- SHF: sshf (索引14) - 表面感热通量
-- SW_net: avg_tnswrf (索引0) 或 avg_snswrf (索引15)
-- LW_net: avg_tnlwrf (索引1) 或 avg_snlwrf (索引16)
+其次是
+$R_n = LE + H + G$
+其中G比较复杂，需要一个静态参数Csoil，csol_bulk_025deg_721x1440_corrected.pt加权后的单位J/(m³·K)
+$C_{\text{soil}} = cs_{\text{soil}} + \theta \cdot c_w$
+
+其中 $\theta$ 是土壤的体积含水量($\text{m}^3 \text{m}^{-3}$),在模型中通过加权的 Volumetric soil water(SW_bulk)计算,$c_w$ 是水的体积热容,是一个常数($4.184 \times 10^6 \text{ J m}^{-3} \text{K}^{-1}$)。最终通过所有上式,我们可以得到土壤热通量的变化,构建陆地能量平衡:
+
+$G = C_{\text{soil}} \cdot D \cdot \frac{T_{\text{soil}}(t+1) - T_{\text{soil}}(t)}{\Delta t_s}$
+还要注意土壤温度是加权后的，需要乘以高度。
 
 ### 3. 表面气压平衡约束
 在大气静力平衡近似下，表面气压 sp 与海平面气压 msl 之间可利用高度修正关系进行连接：
@@ -288,9 +301,9 @@ Epoch 2/50
 2. 标准化与反标准化十分奇怪，定义不一。已经说的很清楚了，用两行代码就能得到标准化与反标准化函数json = '/home/CanglongPhysics/code_v2/ERA5_1940_2019_combined_mean_std.json'
 surface_mean, surface_std, upper_mean, upper_std = load_normalization_arrays(json)
 >>> surface_mean.shape
-(1, 17, 1, 721, 1440)
+(1, 26, 1, 721, 1440)
 >>> upper_mean.shape
-(1, 7, 5, 1, 721, 1440)
+(1, 10, 5, 1, 721, 1440)
 >>> 
 这样直接就不用变换维度，直接和输入矩阵的维度相同，广播计算
     for input_surface, input_upper_air, target_surface, target_upper_air in train_pbar:
@@ -670,16 +683,24 @@ L_total = L_MSE + λ_water·L_water + λ_energy·L_energy + λ_pressure·L_press
 
 其中 L_MSE 是使用的 loss_surface + loss_upper_air。L_water, L_energy, L_pressure 是新增的物理损失项。λ 是一系列超参数，用于平衡各项损失的权重。这个方案直接将物理方程的残差的L1或L2范数（即MAE或MSE）作为损失项。但需要注意，由于所有的输入都被标准化了，因此要先反标准化才有物理意义。
 
+## 物理约束方法
+请参考physical_constraint.md的方式。在train_v3.py中修改# Block 2 # Physical constraint  
+每种约束都写成一个函数，方便对比  
+注意部分计算时用到陆地海洋掩码(constant_masks/is_land.pt, land=1, ocean=0)
+部分水量平衡是在大流域进行计算的(constant_masks/hydrobasin_exorheic_mask.pt, 外流区=1, other=0)
+注意我们的全部变量都是由日尺度平均到周的。因此要进行正确处理。果日数据转换为周数据时使用的是平均而非累加，那么对于累积量（如潜热通量、降水等）会造成严重的数值偏差。
+
 ### 水量平衡约束实现
 
-原始方程 ∆Soil water = P_total − E 中，左侧的 ∆Soil water (土壤水变化量) 需要两个时间点（t1 和 t0）的土壤水含量才能计算 (Soil_water_t1 - Soil_water_t0)。现在模型只输出一个时间点 t1 的状态。
+原始方程 ∆Soil water = P_total − E - R中，左侧的 ∆Soil water (土壤水变化量) 需要两个时间点（t1 和 t0）的土壤水含量才能计算 (Soil_water_t1 - Soil_water_t0)。现在模型只输出一个时间点 t1 的状态。利用模型的输入作为初始状态 t0。陆地的水量平衡只在hydrobasin_exorheic_mask进行计算。
 
-**解决方案**: 利用模型的输入作为初始状态 t0
+同时写出海洋，大气的水量平衡方程。最终汇总成一个总的平衡方程。
 
-**土壤水变化量 (∆S)**:
+
 ```python
 delta_soil_water = output_surface_physical[:, 25, :, :] - input_surface_physical[:, 25, :, :]
 ```
+因为是加权过的，需要乘以高度才能得到总的
 - 索引25 = swvl (体积土壤水层)
 
 **总降水 (P)**: 降水率是模型在预测时间步内的平均速率，因此直接使用输出值。
@@ -751,6 +772,12 @@ delta_phi_physical = 287 * temp_avg * (log(850) - log(700))
 residual_hydrostatic = delta_phi_model - delta_phi_physical
 loss_pressure = MSE(residual_hydrostatic, 0)
 ```
+
+### 气温局地变化方程约束
+
+### 纳维-斯托克斯方程
+
+
 #### 计算RMSE\ACC\SPEI的同号率
 
 分为CAS-Canglong和ECMWF的比较

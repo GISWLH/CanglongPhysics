@@ -15,8 +15,8 @@ import os
 from io import BytesIO
 import xarray as xr
 
-demo_start_time = '2025-10-27'
-demo_end_time = '2025-11-09'
+demo_start_time = '2025-11-03'
+demo_end_time = '2025-11-16'
 
 def upload_to_ftp(ftp_host, ftp_user, ftp_password, local_file_path, ftp_directory):
     """
@@ -913,8 +913,8 @@ def save_and_upload_figure(fig, local_file_path, ftp_host, ftp_user, ftp_passwor
 
 
 # 构建EC降水距平百分比和SPEI的文件名（使用第一周的开始日期和最后一周的结束日期）
-start_date = np.datetime_as_string(china_spei.time.values[0] - np.timedelta64(6, 'D'), unit='D')
-end_date = np.datetime_as_string(china_spei.time.values[-1], unit='D')
+start_date = np.datetime_as_string(china_spei.time.values[0] + np.timedelta64(1, 'D'), unit='D')
+end_date = np.datetime_as_string(china_spei.time.values[-1] + np.timedelta64(7, 'D'), unit='D')
 
 ec_prcp_fig_filename = f'EC_PrcpAnomPercent_forecast_{start_date}_{end_date}.png'
 ec_prcp_fig_local_path = os.path.join('Z:/Data/temp/data', ec_prcp_fig_filename)
