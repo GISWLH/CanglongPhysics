@@ -7,7 +7,15 @@
       "Bash(git commit:*)",
       "Bash(git push)",
       "Bash(python:*)",
-      "Bash(conda activate torch)"
+      "Bash(conda activate torch)",
+      "Bash(cat:*)",
+      "Bash(pkill -f \"train_v3_test.py\" sleep 2 ps aux)",
+      "Bash(pkill -f train_v3_test sleep 2 ps aux)",
+      "Bash(python3:*)",
+      "Bash(mv:*)",
+      "Bash(test:*)",
+      "Bash(mkdir:*)",
+      "Bash(git reset:*)"
     ],
     "deny": [],
     "ask": []

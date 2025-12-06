@@ -13,21 +13,76 @@ from canglong import CanglongV3
 import os
 import torch
 
-# 延迟加载掩码
+# ============ 全局缓存的常量掩码 ============
+# 避免每次计算损失函数时重复加载文件
 MASK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'constant_masks')
-LAND_MASK = None
-BASIN_MASK = None
 
-def load_masks(device):
-    """加载陆地和流域掩码到指定设备"""
-    global LAND_MASK, BASIN_MASK
-    if LAND_MASK is None:
+# 缓存字典，按device存储
+_CACHED_MASKS = {}
+
+def get_cached_masks(device):
+    """
+    获取缓存的常量掩码，避免重复加载
+
+    Returns:
+        dict: 包含 land_mask, basin_mask, ocean_mask, cs_soil_bulk, dem 的字典
+    """
+    global _CACHED_MASKS
+
+    device_key = str(device)
+    if device_key not in _CACHED_MASKS:
+        print(f" Loading constant masks to {device}...")
+
+        # 陆地掩码
         land_path = os.path.join(MASK_DIR, 'is_land.pt')
+        land_mask = torch.load(land_path, map_location=device, weights_only=True).float()
+
+        # 流域掩码
         basin_path = os.path.join(MASK_DIR, 'hydrobasin_exorheic_mask.pt')
-        LAND_MASK = torch.load(land_path, map_location=device)
-        BASIN_MASK = torch.load(basin_path, map_location=device)
-        print(f"✅ Loaded masks: land {LAND_MASK.shape}, basin {BASIN_MASK.shape}")
-    return LAND_MASK, BASIN_MASK
+        basin_mask = torch.load(basin_path, map_location=device, weights_only=True).float()
+
+        # 海洋掩码
+        ocean_mask = 1.0 - land_mask
+
+        # 土壤热容
+        cs_path_corrected = os.path.join(MASK_DIR, 'csol_bulk_025deg_721x1440_corrected.pt')
+        cs_path_original = os.path.join(MASK_DIR, 'csol_bulk_025deg_721x1440.pt')
+
+        if os.path.exists(cs_path_corrected):
+            cs_soil_bulk = torch.load(cs_path_corrected, map_location=device, weights_only=True).float()
+            cs_soil_bulk = torch.clamp(cs_soil_bulk, min=1e6, max=1e7)
+        elif os.path.exists(cs_path_original):
+            cs_soil_bulk = torch.load(cs_path_original, map_location=device, weights_only=True).float()
+            nan_mask = torch.isnan(cs_soil_bulk)
+            if not nan_mask.all():
+                valid_values = cs_soil_bulk[~nan_mask]
+                if valid_values.median() < 1e5:
+                    cs_soil_bulk[~nan_mask] *= 1000
+            cs_soil_bulk = torch.where(nan_mask | (cs_soil_bulk < 1e5),
+                                       torch.tensor(2e6, device=device),
+                                       cs_soil_bulk)
+            cs_soil_bulk = torch.clamp(cs_soil_bulk, min=1e6, max=1e7)
+        else:
+            cs_soil_bulk = torch.ones(721, 1440, device=device) * 2e6
+
+        # DEM高程
+        dem_path = os.path.join(MASK_DIR, 'DEM.pt')
+        if os.path.exists(dem_path):
+            dem = torch.load(dem_path, map_location=device, weights_only=True).float()
+        else:
+            dem = torch.zeros(721, 1440, device=device)
+
+        _CACHED_MASKS[device_key] = {
+            'land_mask': land_mask,
+            'basin_mask': basin_mask,
+            'ocean_mask': ocean_mask,
+            'cs_soil_bulk': cs_soil_bulk,
+            'dem': dem
+        }
+        print(f"Loaded masks: land {land_mask.shape}, basin {basin_mask.shape}, cs_soil {cs_soil_bulk.shape}, dem {dem.shape}")
+
+    return _CACHED_MASKS[device_key]
+
 
 def denormalize_surface(tensor, surface_mean, surface_std):
     """Convert normalized surface data back to physical units."""
@@ -53,7 +108,9 @@ def calculate_land_water_balance_loss(input_physical, output_physical):
         output_physical: 反标准化的输出表面变量 (B, 26, time, lat, lon)
     """
     device = output_physical.device
-    land_mask, basin_mask = load_masks(device)
+    masks = get_cached_masks(device)
+    land_mask = masks['land_mask']
+    basin_mask = masks['basin_mask']
 
     # 变量索引（基于CLAUDE.md）
     idx_lsrr = 4   # 大尺度降雨率 (kg m^-2 s^-1)
@@ -102,8 +159,9 @@ def calculate_ocean_water_balance_loss(input_physical, output_physical):
         output_physical: 反标准化的输出表面变量 (B, 26, time, lat, lon)
     """
     device = output_physical.device
-    land_mask, _ = load_masks(device)
-    ocean_mask = 1.0 - land_mask
+    masks = get_cached_masks(device)
+    land_mask = masks['land_mask']
+    ocean_mask = masks['ocean_mask']
 
     # 变量索引
     idx_lsrr = 4
@@ -215,35 +273,10 @@ def calculate_land_energy_balance_loss(input_physical, output_physical):
     """
     device = output_physical.device
 
-    # 加载陆地掩码
-    land_mask = torch.load('constant_masks/is_land.pt', map_location=device).float()  # (721, 1440)
-
-    # 加载土壤固体热容（优先使用修正后的文件）
-    cs_path_corrected = 'constant_masks/csol_bulk_025deg_721x1440_corrected.pt'
-    cs_path_original = 'constant_masks/csol_bulk_025deg_721x1440.pt'
-
-    if os.path.exists(cs_path_corrected):
-        # 使用已修正的文件
-        cs_soil_bulk = torch.load(cs_path_corrected, map_location=device).float()
-        # 限制土壤热容在合理范围内 (1e6 到 1e7 J/(m³·K))
-        # 典型值: 沙土 ~1.5e6, 粘土 ~3e6, 湿土 ~4e6
-        cs_soil_bulk = torch.clamp(cs_soil_bulk, min=1e6, max=1e7)
-    elif os.path.exists(cs_path_original):
-        # 加载原始文件并修正
-        cs_soil_bulk = torch.load(cs_path_original, map_location=device).float()
-        nan_mask = torch.isnan(cs_soil_bulk)
-        if not nan_mask.all():
-            valid_values = cs_soil_bulk[~nan_mask]
-            if valid_values.median() < 1e5:
-                cs_soil_bulk[~nan_mask] *= 1000  # kJ -> J
-        cs_soil_bulk = torch.where(nan_mask | (cs_soil_bulk < 1e5),
-                                   torch.tensor(2e6, device=device),
-                                   cs_soil_bulk)
-        # 限制范围
-        cs_soil_bulk = torch.clamp(cs_soil_bulk, min=1e6, max=1e7)
-    else:
-        # 默认值
-        cs_soil_bulk = torch.ones(721, 1440, device=device) * 2e6
+    # 使用缓存的掩码
+    masks = get_cached_masks(device)
+    land_mask = masks['land_mask']
+    cs_soil_bulk = masks['cs_soil_bulk']
 
     # 变量索引
     idx_slhf = 13  # slhf - Surface Latent Heat Flux (J/m², 日累积被平均)
@@ -316,9 +349,10 @@ def calculate_ocean_energy_balance_loss(input_physical, output_physical):
     """
     device = output_physical.device
 
-    # 加载掩码
-    land_mask = torch.load('constant_masks/is_land.pt', map_location=device).float()
-    ocean_mask = 1.0 - land_mask
+    # 使用缓存的掩码
+    masks = get_cached_masks(device)
+    land_mask = masks['land_mask']
+    ocean_mask = masks['ocean_mask']
 
     # 变量索引
     idx_slhf = 13  # J/m², 日累积被平均
@@ -475,11 +509,11 @@ def calculate_hydrostatic_balance_loss(output_upper_normalized, output_surface_n
         loss_count += 1
 
     # 2. 地表到850hPa的静力平衡约束
-    # 加载DEM高程数据
-    dem_path = 'constant_masks/DEM.pt'
-    if os.path.exists(dem_path):
-        dem = torch.load(dem_path, map_location=device).float()  # (721, 1440) 单位: m
+    # 使用缓存的DEM高程数据
+    masks = get_cached_masks(device)
+    dem = masks['dem']
 
+    if dem.sum() > 0:  # 确保DEM已加载
         # 提取地表变量
         t2m = output_surface_physical[:, 10, 0, :, :]  # 2m温度 (K)
         sp = output_surface_physical[:, 19, 0, :, :]   # 地表气压 (Pa)
@@ -769,7 +803,6 @@ def calculate_temperature_tendency_loss(input_upper_normalized, output_upper_nor
     return loss
 
 
-# ============ 基于ERA5数据分析得到的最优系数 ============
 # 地转平衡闭合率分析结果 (排除赤道±15°):
 #   200 hPa: 21.8% (c_pgf=0.99)
 #   300 hPa: 19.5% (c_pgf=0.99)
@@ -1075,22 +1108,170 @@ def calculate_geostrophic_loss(output_upper_normalized, upper_mean, upper_std):
 
 def calculate_focus_variable_loss(output_surface_norm, target_surface_norm,
                                   output_upper_norm, target_upper_norm):
-    """Repeat key-variable MSE so their weight doubles in the total loss."""
-    precip_pred = output_surface_norm[:, 0, ...] + output_surface_norm[:, 1, ...]
-    precip_target = target_surface_norm[:, 0, ...] + target_surface_norm[:, 1, ...]
+    """
+    计算重要变量的额外MSE损失，使其权重加倍
+
+    重点变量（基于S2S/MJO预报需求）:
+
+    Surface层:
+    - 索引1: avg_tnlwrf - Mean Top Net Long Wave Radiation Flux (OLR，MJO关键指标)
+    - 索引4: lsrr - Large Scale Rain Rate
+    - 索引5: crr - Convective Rain Rate
+    - 索引10: t2m - 2m Temperature
+
+    Upper Air层 (B, 10, 5, time, lat, lon):
+    - 变量索引3 = u (U风分量)
+    - 压力层索引0 = 200hPa, 压力层索引4 = 850hPa
+    - 200hPa和850hPa纬向风是MJO的关键动力指标
+
+    Args:
+        output_surface_norm: 标准化的输出表面变量 (B, 26, 1, lat, lon)
+        target_surface_norm: 标准化的目标表面变量 (B, 26, 1, lat, lon)
+        output_upper_norm: 标准化的输出高空变量 (B, 10, 5, 1, lat, lon)
+        target_upper_norm: 标准化的目标高空变量 (B, 10, 5, 1, lat, lon)
+
+    Returns:
+        重点变量的额外MSE损失
+    """
+    # 1. 降水损失 (lsrr + crr)
+    # 索引4 = lsrr (大尺度降雨率), 索引5 = crr (对流降雨率)
+    precip_pred = output_surface_norm[:, 4, ...] + output_surface_norm[:, 5, ...]
+    precip_target = target_surface_norm[:, 4, ...] + target_surface_norm[:, 5, ...]
     precip_loss = torch.nn.functional.mse_loss(precip_pred, precip_target)
 
-    # 1: Mean Top Net Long Wave Radiation Flux; 10: 2m Temperature
+    # 2. OLR和2m温度损失
+    # 索引1 = avg_tnlwrf (OLR), 索引10 = t2m (2米温度)
     surface_focus_indices = [1, 10]
     surface_focus_pred = output_surface_norm[:, surface_focus_indices, ...]
     surface_focus_target = target_surface_norm[:, surface_focus_indices, ...]
     surface_focus_loss = torch.nn.functional.mse_loss(surface_focus_pred, surface_focus_target)
 
-    upper_u_pred = output_upper_norm[:, 4, [0, 4], ...]
-    upper_u_target = target_upper_norm[:, 4, [0, 4], ...]
+    # 3. 200hPa和850hPa纬向风损失
+    # Upper air维度: (B, 10, 5, time, lat, lon)
+    # 变量索引3 = u, 压力层索引0 = 200hPa, 压力层索引4 = 850hPa
+    upper_u_pred = output_upper_norm[:, 3, [0, 4], ...]  # 200hPa和850hPa的u风
+    upper_u_target = target_upper_norm[:, 3, [0, 4], ...]
     upper_focus_loss = torch.nn.functional.mse_loss(upper_u_pred, upper_u_target)
 
     return precip_loss + surface_focus_loss + upper_focus_loss
+
+
+# ============ Tweedie损失函数 (Hunt 2025) ============
+# 基于论文: "Stop using root-mean-square error as a precipitation target!"
+# Tweedie分布的方差函数 V(μ) = μ^p，对于 1 < p < 2 是复合Poisson-Gamma分布
+# 适合降水数据：零膨胀、非负、重尾
+
+# ERA5周数据拟合的Tweedie幂参数 (通过方差-均值幂律关系估计)
+TWEEDIE_P_LSRR = 1.54  # 大尺度降水率, R² = 0.91
+TWEEDIE_P_CRR = 1.59   # 对流降水率, R² = 0.95
+
+
+def tweedie_deviance(y_true, y_pred, p):
+    """
+    计算Tweedie deviance损失 (Hunt 2025, Eq. 10)
+
+    d_p(y, μ) = 2 * [y^(2-p) / ((1-p)(2-p)) - y*μ^(1-p) / (1-p) + μ^(2-p) / (2-p)]
+
+    其中:
+    - y 是观测值 (target)
+    - μ 是预测值 (prediction), 必须 > 0
+    - p 是Tweedie幂参数, 1 < p < 2 对应复合Poisson-Gamma分布
+
+    Args:
+        y_true: 观测值张量 (非负)
+        y_pred: 预测值张量 (必须 > 0)
+        p: Tweedie幂参数
+
+    Returns:
+        Tweedie deviance的均值
+    """
+    # 确保预测值为正（加小常数避免数值问题）
+    eps = 1e-8
+    mu = torch.clamp(y_pred, min=eps)
+    y = torch.clamp(y_true, min=0.0)
+
+    # 计算 (1-p) 和 (2-p)
+    one_minus_p = 1.0 - p
+    two_minus_p = 2.0 - p
+
+    # Tweedie deviance公式 (Eq. 10)
+    # d_p(y, μ) = 2 * [y^(2-p) / ((1-p)(2-p)) - y*μ^(1-p) / (1-p) + μ^(2-p) / (2-p)]
+    term1 = torch.pow(y + eps, two_minus_p) / (one_minus_p * two_minus_p)
+    term2 = y * torch.pow(mu, one_minus_p) / one_minus_p
+    term3 = torch.pow(mu, two_minus_p) / two_minus_p
+
+    deviance = 2.0 * (term1 - term2 + term3)
+
+    # 处理NaN和Inf
+    deviance = torch.nan_to_num(deviance, nan=0.0, posinf=0.0, neginf=0.0)
+
+    return deviance.mean()
+
+
+def calculate_tweedie_precipitation_loss(output_surface_physical, target_surface_physical):
+    """
+    计算降水变量的Tweedie损失
+
+    根据Hunt 2025论文，使用Tweedie deviance替代MSE可以：
+    1. 更好地处理零值（降水数据零膨胀）
+    2. 更好地捕获极端降水事件
+    3. 避免负值预测
+
+    变量索引（Surface层）:
+    - 索引4: lsrr - Large Scale Rain Rate (kg m^-2 s^-1)
+    - 索引5: crr - Convective Rain Rate (kg m^-2 s^-1)
+
+    Args:
+        output_surface_physical: 反标准化的输出表面变量 (B, 26, time, lat, lon)
+        target_surface_physical: 反标准化的目标表面变量 (B, 26, time, lat, lon)
+
+    Returns:
+        Tweedie降水损失
+    """
+    # 提取降水变量
+    idx_lsrr = 4
+    idx_crr = 5
+
+    # 获取预测和目标（取第一个时间步）
+    lsrr_pred = output_surface_physical[:, idx_lsrr, 0, :, :]
+    lsrr_target = target_surface_physical[:, idx_lsrr, 0, :, :]
+
+    crr_pred = output_surface_physical[:, idx_crr, 0, :, :]
+    crr_target = target_surface_physical[:, idx_crr, 0, :, :]
+
+    # 确保非负（降水不能为负）
+    lsrr_pred = torch.relu(lsrr_pred)
+    crr_pred = torch.relu(crr_pred)
+    lsrr_target = torch.relu(lsrr_target)
+    crr_target = torch.relu(crr_target)
+
+    # 计算各自的Tweedie损失
+    loss_lsrr = tweedie_deviance(lsrr_target, lsrr_pred, TWEEDIE_P_LSRR)
+    loss_crr = tweedie_deviance(crr_target, crr_pred, TWEEDIE_P_CRR)
+
+    return loss_lsrr + loss_crr
+
+
+def calculate_tweedie_loss(output_surface_norm, target_surface_norm,
+                           surface_mean, surface_std):
+    """
+    计算Tweedie降水损失的包装函数
+
+    Args:
+        output_surface_norm: 标准化的输出表面变量 (B, 26, time, lat, lon)
+        target_surface_norm: 标准化的目标表面变量 (B, 26, time, lat, lon)
+        surface_mean: 表面变量均值
+        surface_std: 表面变量标准差
+
+    Returns:
+        Tweedie降水损失
+    """
+    # 反标准化获取物理值
+    output_physical = output_surface_norm * surface_std + surface_mean
+    target_physical = target_surface_norm * surface_std + surface_mean
+
+    return calculate_tweedie_precipitation_loss(output_physical, target_physical)
+
 
 # Block 3
 # Prepare Dataset
@@ -1224,11 +1405,13 @@ best_valid_loss = float('inf')
 
 # 物理约束权重（根据损失量级动态调整）
 # 目标：让每个物理约束贡献约1-10的损失量级
-lambda_water = 6    # Water loss ~1e11 -> weight 1e-11 -> contribution ~1
-lambda_energy = 3e-5    # Energy loss ~1e12 -> weight 1e-12 -> contribution ~1
+lambda_water = 8    # Water loss ~1e11 -> weight 1e-11 -> contribution ~1
+lambda_energy = 2e-5    # Energy loss ~1e12 -> weight 1e-12 -> contribution ~1
 lambda_pressure = 5e-8   # Pressure loss ~1e6 -> weight 1e-6 -> contribution ~1
-lambda_temperature = 5e-2   # Temperature tendency loss weight
-lambda_momentum = 1e1     # Navier-Stokes momentum loss weight (待调整)
+lambda_temperature = 3e-2   # Temperature tendency loss weight
+lambda_momentum = 1e1     # Navier-Stokes momentum loss weight
+lambda_focus = 0.2        # Focus variable loss weight (使重要变量权重加倍)
+lambda_tweedie = 2.0    # Tweedie precipitation loss weight (Hunt 2025)
 
 # 训练循环
 print("Starting training with physical constraints...")
@@ -1243,6 +1426,8 @@ for epoch in range(num_epochs):
     pressure_loss_total = 0.0
     temperature_loss_total = 0.0
     momentum_loss_total = 0.0
+    focus_loss_total = 0.0
+    tweedie_loss_total = 0.0
 
     train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
     for input_surface, input_upper_air, target_surface, target_upper_air in train_pbar:
@@ -1291,6 +1476,14 @@ for epoch in range(num_epochs):
             input_surface_norm, output_surface,
             upper_mean, upper_std, surface_mean, surface_std
         )
+        loss_focus = calculate_focus_variable_loss(
+            output_surface, target_surface_norm,
+            output_upper_air, target_upper_air_norm
+        )
+        loss_tweedie = calculate_tweedie_loss(
+            output_surface, target_surface_norm,
+            surface_mean, surface_std
+        )
 
         # 总损失
         loss = loss_surface + loss_upper_air + \
@@ -1298,7 +1491,9 @@ for epoch in range(num_epochs):
                lambda_energy * loss_energy + \
                lambda_pressure * loss_pressure + \
                lambda_temperature * loss_temperature + \
-               lambda_momentum * loss_momentum
+               lambda_momentum * loss_momentum + \
+               lambda_focus * loss_focus + \
+               lambda_tweedie * loss_tweedie
         
         # 反向传播和优化
         loss.backward()
@@ -1316,15 +1511,18 @@ for epoch in range(num_epochs):
         pressure_loss_total += loss_pressure.item()
         temperature_loss_total += loss_temperature.item()
         momentum_loss_total += loss_momentum.item()
+        focus_loss_total += loss_focus.item()
+        tweedie_loss_total += loss_tweedie.item()
 
         # 更新进度条
         train_pbar.set_postfix({
             "loss": f"{batch_loss:.4f}",
             "surf": f"{loss_surface.item():.4f}",
             "upper": f"{loss_upper_air.item():.4f}",
+            "focus": f"{loss_focus.item():.4f}",
+            "tweedie": f"{loss_tweedie.item():.2e}",
             "water": f"{loss_water.item():.2e}",
             "energy": f"{loss_energy.item():.2e}",
-            "temp": f"{loss_temperature.item():.2e}",
             "mom": f"{loss_momentum.item():.2e}"
         })
     
@@ -1337,6 +1535,8 @@ for epoch in range(num_epochs):
     pressure_loss_total = pressure_loss_total / len(train_loader)
     temperature_loss_total = temperature_loss_total / len(train_loader)
     momentum_loss_total = momentum_loss_total / len(train_loader)
+    focus_loss_total = focus_loss_total / len(train_loader)
+    tweedie_loss_total = tweedie_loss_total / len(train_loader)
 
     # 验证阶段
     model.eval()
@@ -1348,6 +1548,8 @@ for epoch in range(num_epochs):
     valid_pressure_loss = 0.0
     valid_temperature_loss = 0.0
     valid_momentum_loss = 0.0
+    valid_focus_loss = 0.0
+    valid_tweedie_loss = 0.0
 
     with torch.no_grad():
         valid_pbar = tqdm(valid_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Valid]")
@@ -1394,6 +1596,14 @@ for epoch in range(num_epochs):
                 input_surface_norm, output_surface,
                 upper_mean, upper_std, surface_mean, surface_std
             )
+            loss_focus = calculate_focus_variable_loss(
+                output_surface, target_surface_norm,
+                output_upper_air, target_upper_air_norm
+            )
+            loss_tweedie = calculate_tweedie_loss(
+                output_surface, target_surface_norm,
+                surface_mean, surface_std
+            )
 
             # 总损失
             loss = loss_surface + loss_upper_air + \
@@ -1401,7 +1611,9 @@ for epoch in range(num_epochs):
                    lambda_energy * loss_energy + \
                    lambda_pressure * loss_pressure + \
                    lambda_temperature * loss_temperature + \
-                   lambda_momentum * loss_momentum
+                   lambda_momentum * loss_momentum + \
+                   lambda_focus * loss_focus + \
+                   lambda_tweedie * loss_tweedie
 
             # 累加损失
             batch_loss = loss.item()
@@ -1413,15 +1625,18 @@ for epoch in range(num_epochs):
             valid_pressure_loss += loss_pressure.item()
             valid_temperature_loss += loss_temperature.item()
             valid_momentum_loss += loss_momentum.item()
+            valid_focus_loss += loss_focus.item()
+            valid_tweedie_loss += loss_tweedie.item()
 
             # 更新进度条
             valid_pbar.set_postfix({
                 "loss": f"{batch_loss:.4f}",
                 "surf": f"{loss_surface.item():.4f}",
                 "upper": f"{loss_upper_air.item():.4f}",
+                "focus": f"{loss_focus.item():.4f}",
+                "tweedie": f"{loss_tweedie.item():.2e}",
                 "water": f"{loss_water.item():.2e}",
                 "energy": f"{loss_energy.item():.2e}",
-                "temp": f"{loss_temperature.item():.2e}",
                 "mom": f"{loss_momentum.item():.2e}"
             })
     
@@ -1434,14 +1649,20 @@ for epoch in range(num_epochs):
     valid_pressure_loss = valid_pressure_loss / len(valid_loader)
     valid_temperature_loss = valid_temperature_loss / len(valid_loader)
     valid_momentum_loss = valid_momentum_loss / len(valid_loader)
+    valid_focus_loss = valid_focus_loss / len(valid_loader)
+    valid_tweedie_loss = valid_tweedie_loss / len(valid_loader)
 
     # 打印损失
     print(f"\nEpoch {epoch+1}/{num_epochs}")
     print(f"  Train - Total: {train_loss:.6f}")
     print(f"         MSE - Surface: {surface_loss:.6f}, Upper Air: {upper_air_loss:.6f}")
+    print(f"         Focus - Raw: {focus_loss_total:.6f}, Weighted: {lambda_focus*focus_loss_total:.6f}")
+    print(f"         Tweedie (Hunt 2025) - Raw: {tweedie_loss_total:.2e}, Weighted: {lambda_tweedie*tweedie_loss_total:.6f}")
     print(f"         Physical Raw - Water: {water_loss_total:.2e}, Energy: {energy_loss_total:.2e}, Pressure: {pressure_loss_total:.2e}, Temp: {temperature_loss_total:.2e}, Mom: {momentum_loss_total:.2e}")
     print(f"         Physical Weighted - Water: {lambda_water*water_loss_total:.6f}, Energy: {lambda_energy*energy_loss_total:.6f}, Pressure: {lambda_pressure*pressure_loss_total:.6f}, Temp: {lambda_temperature*temperature_loss_total:.6f}, Mom: {lambda_momentum*momentum_loss_total:.6f}")
     print(f"  Valid - Total: {valid_loss:.6f}")
     print(f"         MSE - Surface: {valid_surface_loss:.6f}, Upper Air: {valid_upper_air_loss:.6f}")
+    print(f"         Focus - Raw: {valid_focus_loss:.6f}, Weighted: {lambda_focus*valid_focus_loss:.6f}")
+    print(f"         Tweedie (Hunt 2025) - Raw: {valid_tweedie_loss:.2e}, Weighted: {lambda_tweedie*valid_tweedie_loss:.6f}")
     print(f"         Physical Raw - Water: {valid_water_loss:.2e}, Energy: {valid_energy_loss:.2e}, Pressure: {valid_pressure_loss:.2e}, Temp: {valid_temperature_loss:.2e}, Mom: {valid_momentum_loss:.2e}")
     print(f"         Physical Weighted - Water: {lambda_water*valid_water_loss:.6f}, Energy: {lambda_energy*valid_energy_loss:.6f}, Pressure: {lambda_pressure*valid_pressure_loss:.6f}, Temp: {lambda_temperature*valid_temperature_loss:.6f}, Mom: {lambda_momentum*valid_momentum_loss:.6f}")

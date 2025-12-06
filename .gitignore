@@ -3,6 +3,8 @@ constant_masks/*.pt
 checkpoints/
 checkpoints_v2/
 checkpoints_v3/
+checkpoints_v3_test/
 code_v2/checkpoints_v3/
-# Ignore large model files (>200MB)
+# Ignore large model files (>100MB)
 *.pth
+*.pt

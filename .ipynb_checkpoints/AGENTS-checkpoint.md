@@ -20,8 +20,8 @@ CanglongPhysics 是一个专注于将物理信息添加到AI天气预测模型�
 
 ### 数据处理管道
 该项目处理来自ERA5的多维天气数据：
-- **地面变量**: 16个变量，包括降水、温度、压力、风分量
-- **高空变量**: 7个变量，跨越4个压力层(300、500、700、850 hPa)
+- **地面变量**: 26个变量，包括辐射通量、云参数、降水、风分量、温度、湍流应力、热通量、气压、海洋参数、土壤参数
+- **高空变量**: 10个变量，跨越5个压力层(200, 300, 500, 700, 850 hPa)
 - **静态数据**: 地形、土地覆盖、土壤类型存储在 `constant_masks/` 中
 
 ### 自定义神经网络组件
@@ -38,6 +38,116 @@ CanglongPhysics 是一个专注于将物理信息添加到AI天气预测模型�
 - **数据缩放**: 从40年ERA5数据中学习物理尺度
 - **PINN物理**: 集成Navier-Stokes方程
 - **向量量化**: 离散特征表示的码本方法
+
+## ERA5 变量排序与命名规范
+
+### 📋 变量总览
+
+| 类别 | 数量 | 维度 | 说明 |
+|------|------|------|------|
+| **Surface变量** | 26 | (26, 721, 1440) | 地表单层变量 |
+| **Upper Air变量** | 10 | (10, 5, 721, 1440) | 高空多层变量 |
+| **压力层** | 5 | - | 200, 300, 500, 700, 850 hPa |
+| **空间网格** | - | 721×1440 | 0.25°分辨率全球网格 |
+
+### 🌍 Surface变量（地表变量）
+
+**严格顺序列表（必须按此顺序）**
+
+| 索引 | 变量名 | 英文全称 | 中文名称 | 单位 | 典型范围 |
+|------|--------|----------|----------|------|----------|
+| 0 | **avg_tnswrf** | Mean Top Net Short Wave Radiation Flux | 平均顶部净短波辐射通量 | W/m² | 0-400 |
+| 1 | **avg_tnlwrf** | Mean Top Net Long Wave Radiation Flux | 平均顶部净长波辐射通量 | W/m² | -300--100 |
+| 2 | **tciw** | Total Column Cloud Ice Water | 总柱云冰水 | kg/m² | 0-0.5 |
+| 3 | **tcc** | Total Cloud Cover | 总云覆盖率 | 0-1 | 0-1 |
+| 4 | **lsrr** | Large Scale Rain Rate | 大尺度降雨率 | kg/m²/s | 0-0.01 |
+| 5 | **crr** | Convective Rain Rate | 对流降雨率 | kg/m²/s | 0-0.01 |
+| 6 | **blh** | Boundary Layer Height | 边界层高度 | m | 100-3000 |
+| 7 | **u10** | 10m U Component of Wind | 10米U风分量 | m/s | -50-50 |
+| 8 | **v10** | 10m V Component of Wind | 10米V风分量 | m/s | -50-50 |
+| 9 | **d2m** | 2m Dewpoint Temperature | 2米露点温度 | K | 200-320 |
+| 10 | **t2m** | 2m Temperature | 2米温度 | K | 200-330 |
+| 11 | **avg_iews** | Mean Eastward Turbulent Surface Stress | 平均东向湍流表面应力 | N/m² | -1-1 |
+| 12 | **avg_inss** | Mean Northward Turbulent Surface Stress | 平均北向湍流表面应力 | N/m² | -1-1 |
+| 13 | **slhf** | Surface Latent Heat Flux | 表面潜热通量 | J/m² | -1e7-1e7 |
+| 14 | **sshf** | Surface Sensible Heat Flux | 表面感热通量 | J/m² | -1e6-1e6 |
+| 15 | **avg_snswrf** | Mean Surface Net Short Wave Radiation Flux | 平均表面净短波辐射通量 | W/m² | 0-300 |
+| 16 | **avg_snlwrf** | Mean Surface Net Long Wave Radiation Flux | 平均表面净长波辐射通量 | W/m² | -150-0 |
+| 17 | **ssr** | Surface Net Solar Radiation | 表面净太阳辐射 | J/m² | 0-1e6 |
+| 18 | **str** | Surface Net Thermal Radiation | 表面净热辐射 | J/m² | -5e5-0 |
+| 19 | **sp** | Surface Pressure | 表面气压 | Pa | 50000-110000 |
+| 20 | **msl** | Mean Sea Level Pressure | 平均海平面气压 | Pa | 95000-105000 |
+| 21 | **siconc** | Sea Ice Concentration | 海冰浓度 | 0-1 | 0-1 |
+| 22 | **sst** | Sea Surface Temperature | 海表温度 | K | 271-310 |
+| 23 | **ro** | Runoff | 径流 | m | 0-0.01 |
+| 24 | **stl** | Soil Temperature Layer | 土壤温度层 | K | 200-330 |
+| 25 | **swvl** | Volumetric Soil Water Layer | 体积土壤水层 | m³/m³ | 0-1 |
+
+注意后两个是加权变量
+各层厚度：
+d1 = 0.07 m (7 cm)
+d2 = 0.21 m (21 cm)
+d3 = 0.72 m (72 cm)
+d4 = 1.89 m (189 cm)
+总深度 = 2.89 m
+加权公式：
+swvl = (swvl1 * 0.07 + swvl2 * 0.21 + swvl3 * 0.72 + swvl4 * 1.89) / 2.89
+stl = (stl1 * 0.07 + stl2 * 0.21 + stl3 * 0.72 + stl4 * 1.89) / 2.89
+
+**Python数组定义**
+```python
+surf_vars = ['avg_tnswrf', 'avg_tnlwrf', 'tciw', 'tcc', 'lsrr', 'crr', 'blh',
+             'u10', 'v10', 'd2m', 't2m', 'avg_iews', 'avg_inss', 'slhf', 'sshf',
+             'avg_snswrf', 'avg_snlwrf', 'ssr', 'str', 'sp', 'msl', 'siconc',
+             'sst', 'ro', 'stl', 'swvl']
+```
+
+**数组维度**
+- **输入**: `(batch, 26, time_steps, 721, 1440)`
+- **输出**: `(batch, 26, 1, 721, 1440)`
+- **标准化参数**: `(1, 26, 1, 721, 1440)`
+
+### ☁️ Upper Air变量（高空变量）
+
+**严格顺序列表（必须按此顺序）**
+
+| 索引 | 变量名 | 英文全称 | 中文名称 | 单位 | 典型范围 |
+|------|--------|----------|----------|------|----------|
+| 0 | **o3** | Ozone Mass Mixing Ratio | 臭氧质量混合比 | kg/kg | 0-1e-5 |
+| 1 | **z** | Geopotential | 位势高度 | m²/s² | 0-120000 |
+| 2 | **t** | Temperature | 温度 | K | 180-320 |
+| 3 | **u** | U Component of Wind | U风分量 | m/s | -100-100 |
+| 4 | **v** | V Component of Wind | V风分量 | m/s | -100-100 |
+| 5 | **w** | Vertical Velocity | 垂直速度 | Pa/s | -5-5 |
+| 6 | **q** | Specific Humidity | 比湿 | kg/kg | 0-0.02 |
+| 7 | **cc** | Fraction of Cloud Cover | 云覆盖分数 | 0-1 | 0-1 |
+| 8 | **ciwc** | Specific Cloud Ice Water Content | 比云冰水含量 | kg/kg | 0-0.001 |
+| 9 | **clwc** | Specific Cloud Liquid Water Content | 比云液水含量 | kg/kg | 0-0.001 |
+
+**Python数组定义**
+```python
+upper_vars = ['o3', 'z', 't', 'u', 'v', 'w', 'q', 'cc', 'ciwc', 'clwc']
+```
+
+**压力层顺序（从高到低）**
+
+| 索引 | 压力层 | 高度范围 | 说明 |
+|------|--------|----------|------|
+| 0 | **200 hPa** | ~12 km | 对流层顶/平流层底 |
+| 1 | **300 hPa** | ~9 km | 对流层上部 |
+| 2 | **500 hPa** | ~5.5 km | 对流层中部 |
+| 3 | **700 hPa** | ~3 km | 对流层下部 |
+| 4 | **850 hPa** | ~1.5 km | 边界层顶部 |
+
+**Python数组定义**
+```python
+levels = [200, 300, 500, 700, 850]  # h5文件中的顺序（从高到低）
+```
+
+**数组维度**
+- **输入**: `(batch, 10, 5, time_steps, 721, 1440)`
+- **输出**: `(batch, 10, 5, 1, 721, 1440)`
+- **标准化参数**: `(1, 10, 5, 1, 721, 1440)`
 
 ## 数据结构与格式
 
@@ -72,25 +182,73 @@ CanglongPhysics 是一个专注于将物理信息添加到AI天气预测模型�
 
 ## 模型架构详情
 
-模型输入由三部分组成，高空层，表面层，和Earth constant层。
-    7个高空层，按顺序Geopotential, Vertical velocity, u component of wind, v component of wind, Fraction of cloud cover, Temperature, Specific humidity包括5个层级200, 300, 500, 700, 850 hpa
-    17个表面层，按顺序large_scale_rain_rate, convective_rain_rate, total_column_cloud_ice_water, total_cloud_cover, top_net_solar_radiation_clear_sky, 10m_u_component_of_wind, 10m_v_component_of_wind, 2m_dewpoint_temperature, 2m_temperature, mean_top_net_long_wave_radiation_flux, surface_latent_heat_flux, surface_sensible_heat_flux, surface_pressure, volumetric_soil_water_layer
-    其中高空层(1, 7, 5, 2, 721, 1440)代表(batch, features, hpa, time, lat, lon) 经过patchembed4d(conv4D)后变为(1, 96, 3, 1, 181, 360)，其中96是更高维的特征
-    其中表面层(1, 17, 2, 721, 1440)代表(batch, features, time, lat, lon) encoder3d(conv3D+resnet)后变为(1, 96, 2, 181, 360)，其中96是更高维的特征
-    其中常值地球变量层(64, 721, 1440)代表(64个常值地球变量，如土地覆盖等, lat, lon)，经过conv3D变为(1, 96, 181, 360)
-    然后这三个堆叠为（按顺序upper air, surface, constant）为(96, 3+2+1, 181, 360)后经过Earth Attention Block (Swin Transformer)
-    
-    经过Swin-Transformer后，(1, 192, 6, 181, 360) after earthlayer, output_surface = output[:, :, 3:5, :, :]  #  四五层是surface，output_upper_air = output[:, :, :3, :, :]  # 前三层是upper air
-    然后再把他们还原成原本的surface和upper air，这里surface还原(1, 17, 2, 721, 1440)，upper air仅仅还原torch.Size([1, 7, 5, 2, 721, 1440])
+模型输入由三部分组成：高空层、表面层和Earth constant层。
+
+### 输入变量详情
+
+**高空层 (Upper Air)**
+- **变量数量**: 10个变量 (o3, z, t, u, v, w, q, cc, ciwc, clwc)
+- **压力层**: 5个层级 (200, 300, 500, 700, 850 hPa)
+- **输入维度**: (batch, 10, 5, time, lat, lon) = (1, 10, 5, 2, 721, 1440)
+- **经过patchembed4d (conv4D)**: (1, 96, 3, 1, 181, 360)，其中96是高维特征
+
+**表面层 (Surface)**
+- **变量数量**: 26个变量 (详见 ERA5 变量排序与命名规范)
+- **输入维度**: (batch, 26, time, lat, lon) = (1, 26, 2, 721, 1440)
+- **经过encoder3d (conv3D+resnet)**: (1, 96, 2, 181, 360)，其中96是高维特征
+
+**常值地球变量层 (Earth Constant)**
+- **变量数量**: 64个常值地球变量（如土地覆盖、地形等）
+- **输入维度**: (64, 721, 1440)
+- **经过conv3D**: (1, 96, 181, 360)
+
+### 模型处理流程
+
+1. **特征堆叠**: 三个部分按顺序（upper air, surface, constant）堆叠为 (96, 3+2+1, 181, 360)
+2. **Earth Attention Block (Swin Transformer)**: 经过Swin-Transformer后得到 (1, 192, 6, 181, 360)
+3. **输出分离**:
+   - output_surface = output[:, :, 3:5, :, :]  # 第4-5层是surface
+   - output_upper_air = output[:, :, :3, :, :]  # 前3层是upper air
+4. **输出还原**:
+   - Surface还原: (1, 26, 2, 721, 1440)
+   - Upper Air还原: (1, 10, 5, 2, 721, 1440)
 
 ## 考虑物理信息约束
 考虑以下物理信息：
-* 水量平衡约束，用土壤水可以构造一个简单的水量平衡公式
-∆Soil 𝑤𝑎𝑡𝑒𝑟=𝑃_𝑡𝑜𝑡𝑎𝑙−𝐸−𝑅+𝜀，其中soil water是volumetric_soil_water_layer，P是large_scale_rain_rate和convective_rain_rate之和，E可以用surface_latent_heat_flux，R暂时忽略
-* 能量平衡约束，反映了海表通过辐射与热通量之间的基本能量平衡
-σSST^4=LHF+SHF+tsrc，其中tsrc代表总的向下能量通量，即 tsrc = SW_net + LW_↓。σSST⁴, LHF, SHF 分别代表向上长波辐射、潜热和感热这三项能量损失。其中tsrc可用top_net_solar_radiation_clear_sky替代？
-* 表面气压平衡约束，在大气静力平衡近似下，表面气压 sp 与海平面气压 msl 之间可利用高度修正关系进行连接
-Msl=sp×exp⁡(𝑔𝑍/(𝑅_𝑑 𝑡2𝑚))
+
+### 1. 水量平衡约束
+用土壤水可以构造一个简单的水量平衡公式：
+∆Soil water = P_total − E − R + ε
+
+**变量索引（Surface层）**:
+- soil water: swvl (索引25) - 体积土壤水层
+- P_total: lsrr (索引4) + crr (索引5) - 大尺度降雨率 + 对流降雨率
+- E: slhf (索引13) - 表面潜热通量
+- R: 暂时忽略
+
+### 2. 能量平衡约束
+
+先构建
+$$R_n = \text{mean\_surface\_net\_short\_wave\_radiation\_flux} + \text{mean\_surface\_net\_long\_wave\_radiation\_flux}$$
+
+其次是
+$R_n = LE + H + G$
+其中G比较复杂，需要一个静态参数Csoil，csol_bulk_025deg_721x1440_corrected.pt加权后的单位J/(m³·K)
+$C_{\text{soil}} = cs_{\text{soil}} + \theta \cdot c_w$
+
+其中 $\theta$ 是土壤的体积含水量($\text{m}^3 \text{m}^{-3}$),在模型中通过加权的 Volumetric soil water(SW_bulk)计算,$c_w$ 是水的体积热容,是一个常数($4.184 \times 10^6 \text{ J m}^{-3} \text{K}^{-1}$)。最终通过所有上式,我们可以得到土壤热通量的变化,构建陆地能量平衡:
+
+$G = C_{\text{soil}} \cdot D \cdot \frac{T_{\text{soil}}(t+1) - T_{\text{soil}}(t)}{\Delta t_s}$
+还要注意土壤温度是加权后的，需要乘以高度。
+
+### 3. 表面气压平衡约束
+在大气静力平衡近似下，表面气压 sp 与海平面气压 msl 之间可利用高度修正关系进行连接：
+Msl = sp × exp(gZ / (R_d × t2m))
+
+**变量索引（Surface层）**:
+- sp: sp (索引19) - 表面气压
+- msl: msl (索引20) - 平均海平面气压
+- t2m: t2m (索引10) - 2米温度
 关键是如何在损失函数中体现这一点，目前的模型，仅仅用MSE Loss
 ```
 # 前向传播
@@ -143,9 +301,9 @@ Epoch 2/50
 2. 标准化与反标准化十分奇怪，定义不一。已经说的很清楚了，用两行代码就能得到标准化与反标准化函数json = '/home/CanglongPhysics/code_v2/ERA5_1940_2019_combined_mean_std.json'
 surface_mean, surface_std, upper_mean, upper_std = load_normalization_arrays(json)
 >>> surface_mean.shape
-(1, 17, 1, 721, 1440)
+(1, 26, 1, 721, 1440)
 >>> upper_mean.shape
-(1, 7, 5, 1, 721, 1440)
+(1, 10, 5, 1, 721, 1440)
 >>> 
 这样直接就不用变换维度，直接和输入矩阵的维度相同，广播计算
     for input_surface, input_upper_air, target_surface, target_upper_air in train_pbar:
@@ -190,9 +348,29 @@ upper_std_np = upper_std_np.squeeze(0).squeeze(2)
 由于train_v3.py和test_v3.py共用前面的模型定义，你先改好一个，再根据另一个也调试好。
 
 ## 利用损失函数增强预报能力
-这里我们给予一些变量额外的权重，以增强预测能力，S2S重点是MJO，因此侧重OLR (avg_tnlwrf) ，850hPa和200hPa纬向风（u风分量），还侧重降水和t2m，d2m
-降水是0,1之和，d2m是7，t2m是8，avg_tnlwrf是9
-850和200的u在torch.Size([1, 7, 5, 2, 721, 1440])中分别是[0, 2, 0 & 4, :, :, :]
+这里我们给予一些变量额外的权重，以增强预测能力。S2S（次季节-季节）预报重点是MJO（Madden-Julian Oscillation），因此需要侧重以下变量：
+
+### 关键变量权重设置
+
+**Surface层关键变量**:
+- **OLR** (Outgoing Longwave Radiation): avg_tnlwrf (索引1) - 平均顶部净长波辐射通量
+- **降水**: lsrr (索引4) + crr (索引5) - 大尺度降雨率 + 对流降雨率
+- **d2m**: d2m (索引9) - 2米露点温度
+- **t2m**: t2m (索引10) - 2米温度
+
+**Upper Air层关键变量**:
+- **850hPa U风**: 在 (batch, 10, 5, time, lat, lon) 中为 [:, 3, 4, :, :, :]
+  - 变量索引3 = u (U风分量)
+  - 压力层索引4 = 850hPa
+- **200hPa U风**: 在 (batch, 10, 5, time, lat, lon) 中为 [:, 3, 0, :, :, :]
+  - 变量索引3 = u (U风分量)
+  - 压力层索引0 = 200hPa
+
+**维度说明**:
+- Surface: (batch, 26, time, lat, lon)
+- Upper Air: (batch, 10, 5, time, lat, lon)
+  - 10 = 变量数 (o3, z, t, u, v, w, q, cc, ciwc, clwc)
+  - 5 = 压力层数 (200, 300, 500, 700, 850 hPa)
 
 ### Canglong模型结构
 1. **Patch嵌入**: 将2D/3D/4D数据转换为token
@@ -453,81 +631,152 @@ ECMWF是1.5°分辨率，CAS-Canglong是0.25°，下载好的观测是0.25°全�
 #### 模型研发阶段
 
 模型研发阶段是在base环境中运行的，无需activate torch
+
 现在是进行v2模型研发的阶段，之前的v1模型在code_v2/model_v1.py，新的模型基于v1版本，请你编辑model_test.py有如下更改：
-1. 我为upper air增加了一层，现在输入是input_upper_air = torch.randn(1, 7, 4->5, 2, 721, 1440).cuda()，请根据新增的一层，调通模型，模型由三部分组成，高空层，表面层，和Earth constant层。
-    其中高空层(1, 7, 5, 2, 721, 1440)代表(batch, features, hpa, time, lat, lon) 经过patchembed4d(conv4D)后变为(1, 96, 3, 1, 181, 360)，其中96是更高维的特征
-    其中表面层(1, 17, 2, 721, 1440)代表(batch, features, time, lat, lon) encoder3d(conv3D+resnet)后变为(1, 96, 2, 181, 360)，其中96是更高维的特征
-    其中常值地球变量层(64, 721, 1440)代表(64个常值地球变量，如土地覆盖等, lat, lon)，经过conv3D变为(1, 96, 181, 360)
-    然后这三个堆叠为（按顺序upper air, surface, constant）为(96, 1+2+1, 181, 360)后经过Earth Attention Block (Swin Transformer)
-    
-    经过Swin-Transformer后，(1, 192, 6, 181, 360) after earthlayer, output_surface = output[:, :, 3:5, :, :]  #  四五层是surface，output_upper_air = output[:, :, :3, :, :]  # 前三层是upper air
-    然后再把他们还原成原本的surface和upper air，这里surface可以正常还原(1, 17, 2, 721, 1440)，但是upper air仅仅还原了4层，torch.Size([1, 7, 4, 2, 721, 1440])，请你尝试帮忙解决
-    
-2. 现在的surface和upper air层输入后，经过U-Transformer类似的结构，最后能还原回去(1, 17, 2, 721, 1440)和(1, 7, 5, 2, 721, 1440)
-   我希望最后能变成1个时间尺度，即(1, 17, 1, 721, 1440)和(1, 7, 5, 1, 721, 1440)，给我头脑风暴几种深度学习AI天气预测最合适的方案
-   
-3. 传统的Swin-Transformer通过固定交换窗口信息，这里我想在AI模型中根据天气的信息添加风向的窗口交换。即根据u/v进行求算主导风向，根据风向交换一次窗口信息。我思考的一种方式是，先在upper_air(1, 7, 5, 2, 721, 1440)的3，4层是uv，提取出来upper_air(1, 2:4, 5, 2, 721, 1440)是多层u,v；然后和在surface(1, 17, 2, 721, 1440)的5, 6层是10m uv，提取出来 surface(1, 4:6, 2, 721, 1440)是10m uv。由于在编码器中这些特征马上就变为了高维度变量(1, 96, 181, 360)，失去了物理意义。建议在encoder之前先计算出粗略的风向，在181，360的4✖️4下采样计算主导风向，记录下这些信息。之后在swin-transformer块尽可能根据记录的风向信息，进行窗口物理变化。你头脑风暴下提供一些能实现这个的方案。建议类似的方案如预先离线生成 9 份注意力掩码（1 份不移位 + 8 份按 N、NE … 等方向移位）。前向时根据每个窗口中心像素的风向 id 选择对应的掩码。能实现代码侵入性最低；且掩码与特征解耦，不破坏已有 CUDA kernel；
+
+1. **更新模型输入维度**
+   模型由三部分组成：高空层、表面层和Earth constant层。
+
+   - **高空层**: (1, 10, 5, 2, 721, 1440) 代表 (batch, features, hpa, time, lat, lon)
+     - 10个变量: o3, z, t, u, v, w, q, cc, ciwc, clwc
+     - 5个压力层: 200, 300, 500, 700, 850 hPa
+     - 经过 patchembed4d (conv4D) 后变为 (1, 96, 3, 1, 181, 360)，其中96是高维特征
+
+   - **表面层**: (1, 26, 2, 721, 1440) 代表 (batch, features, time, lat, lon)
+     - 26个变量: 详见 ERA5 变量排序与命名规范
+     - 经过 encoder3d (conv3D+resnet) 后变为 (1, 96, 2, 181, 360)，其中96是高维特征
+
+   - **常值地球变量层**: (64, 721, 1440) 代表 (64个常值地球变量，如土地覆盖等, lat, lon)
+     - 经过 conv3D 变为 (1, 96, 181, 360)
+
+   然后这三个堆叠为（按顺序upper air, surface, constant）为 (96, 3+2+1, 181, 360) 后经过 Earth Attention Block (Swin Transformer)
+
+   经过 Swin-Transformer 后，(1, 192, 6, 181, 360) after earthlayer:
+   - output_surface = output[:, :, 3:5, :, :]  # 第4-5层是surface
+   - output_upper_air = output[:, :, :3, :, :]  # 前3层是upper air
+
+   然后再把他们还原成原本的surface和upper air：
+   - surface还原: (1, 26, 2, 721, 1440)
+   - upper air还原: (1, 10, 5, 2, 721, 1440)
+
+2. **时间维度压缩**
+   现在的surface和upper air层输入后，经过U-Transformer类似的结构，最后能还原回去 (1, 26, 2, 721, 1440) 和 (1, 10, 5, 2, 721, 1440)
+   我希望最后能变成1个时间尺度，即 (1, 26, 1, 721, 1440) 和 (1, 10, 5, 1, 721, 1440)，给我头脑风暴几种深度学习AI天气预测最合适的方案
+
+3. **风向感知的窗口注意力**
+   传统的Swin-Transformer通过固定交换窗口信息，这里我想在AI模型中根据天气的信息添加风向的窗口交换。即根据u/v进行求算主导风向，根据风向交换一次窗口信息。
+
+   **变量索引**:
+   - upper_air (1, 10, 5, 2, 721, 1440): 索引3,4层是u,v风分量
+     - 提取: upper_air[:, 3:5, :, :, :, :] 得到多层u,v
+   - surface (1, 26, 2, 721, 1440): 索引7,8层是10m u,v风分量
+     - 提取: surface[:, 7:9, :, :, :] 得到10m u,v
+
+   由于在编码器中这些特征马上就变为了高维度变量(1, 96, 181, 360)，失去了物理意义。建议在encoder之前先计算出粗略的风向，在181，360的4✖️4下采样计算主导风向，记录下这些信息。之后在swin-transformer块尽可能根据记录的风向信息，进行窗口物理变化。
+
+   **建议方案**: 预先离线生成 9 份注意力掩码（1 份不移位 + 8 份按 N、NE … 等方向移位）。前向时根据每个窗口中心像素的风向 id 选择对应的掩码。能实现代码侵入性最低；且掩码与特征解耦，不破坏已有 CUDA kernel；
 
 4. 添加物理约束，采用上文提到的三个方程。核心思想是将物理方程的**残差（residual）作为一个软约束（soft constraint）**添加到总的损失函数中。如果模型的预测结果完美符合物理定律，那么这个物理方程的残差就为零，不会产生额外的损失。如果预测结果违反了物理定律，残差就会变大，从而产生一个惩罚项，引导模型参数向着更符合物理规律的方向更新。
-总的损失函数将变为：
-L_total=L_MSE+λ_waterL_water+λ_energyL_energy+λ_pressureL_pressure
+
+### 总损失函数
+L_total = L_MSE + λ_water·L_water + λ_energy·L_energy + λ_pressure·L_pressure
+
 其中 L_MSE 是使用的 loss_surface + loss_upper_air。L_water, L_energy, L_pressure 是新增的物理损失项。λ 是一系列超参数，用于平衡各项损失的权重。这个方案直接将物理方程的残差的L1或L2范数（即MAE或MSE）作为损失项。但需要注意，由于所有的输入都被标准化了，因此要先反标准化才有物理意义。
-原始方程 ∆Soil water = P_total − E 中，左侧的 ∆Soil water (土壤水变化量) 需要两个时间点（t1 和 t0）的土壤水含量才能计算 (Soil_water_t1 - Soil_water_t0)。现在模型只输出一个时间点 t1 的状态。
-解决方案: 利用模型的输入作为初始状态 t0，土壤水变化量 (∆S):delta_soil_water = output_surface_physical[:, 13, :, :] - input_surface_physical[:, 13, :, :]
-总降水 (P): 降水率是模型在预测时间步内的平均速率，因此直接使用输出值。
-large_scale_rain = output_surface_physical[:, 0, :, :] 单位kg m**-2 s**-1
-convective_rain = output_surface_physical[:, 1, :, :] 单位kg m**-2 s**-1
+
+## 物理约束方法
+请参考physical_constraint.md的方式。在train_v3.py中修改# Block 2 # Physical constraint  
+每种约束都写成一个函数，方便对比  
+注意部分计算时用到陆地海洋掩码(constant_masks/is_land.pt, land=1, ocean=0)
+部分水量平衡是在大流域进行计算的(constant_masks/hydrobasin_exorheic_mask.pt, 外流区=1, other=0)
+注意我们的全部变量都是由日尺度平均到周的。因此要进行正确处理。果日数据转换为周数据时使用的是平均而非累加，那么对于累积量（如潜热通量、降水等）会造成严重的数值偏差。
+
+### 水量平衡约束实现
+
+原始方程 ∆Soil water = P_total − E - R中，左侧的 ∆Soil water (土壤水变化量) 需要两个时间点（t1 和 t0）的土壤水含量才能计算 (Soil_water_t1 - Soil_water_t0)。现在模型只输出一个时间点 t1 的状态。利用模型的输入作为初始状态 t0。陆地的水量平衡只在hydrobasin_exorheic_mask进行计算。
+
+同时写出海洋，大气的水量平衡方程。最终汇总成一个总的平衡方程。
+
+
+```python
+delta_soil_water = output_surface_physical[:, 25, :, :] - input_surface_physical[:, 25, :, :]
+```
+因为是加权过的，需要乘以高度才能得到总的
+- 索引25 = swvl (体积土壤水层)
+
+**总降水 (P)**: 降水率是模型在预测时间步内的平均速率，因此直接使用输出值。
+```python
+large_scale_rain = output_surface_physical[:, 4, :, :]  # 单位kg m**-2 s**-1, 索引4=lsrr
+convective_rain = output_surface_physical[:, 5, :, :]  # 单位kg m**-2 s**-1, 索引5=crr
 p_total = (large_scale_rain + convective_rain) * delta_t
-(这里的 delta_t 是预测的时间步长，单位是秒。例如，如果模型预测6小时后的状态，delta_t = 6 * 3600。你需要将降水率乘以时间，这里是一周，得到总降水量。)
-蒸发 (E): 同样，潜热通量也需要乘以时间步长。
-latent_heat_flux = output_surface_physical[:, 10, :, :] 单位J m**-2
+```
+(这里的 delta_t 是预测的时间步长，单位是秒。例如，如果模型预测一周的状态，delta_t = 7 × 24 × 3600)
+
+**蒸发 (E)**: 同样，潜热通量也需要乘以时间步长。
+```python
+latent_heat_flux = output_surface_physical[:, 13, :, :]  # 单位J m**-2, 索引13=slhf
 evaporation = latent_heat_flux / (2.5e6) * delta_t
-计算水量残差:
+```
+
+**计算水量残差**:
+```python
 residual_water = delta_soil_water - (p_total - evaporation)
 loss_water = MSE(residual_water, 0)
+```
 
-能量平衡约束
-具体写法:
+### 能量平衡约束实现
+
 所有变量都来自反标准化后的模型输出 output_surface_physical。
-计算各项:
-sw_net = output_surface_physical[:, 4, :, :] (净太阳短波辐射) 单位J m**-2
-lw_net = output_surface_physical[:, 9, :, :] (净长波辐射，通常向上为正，代表能量损失) 单位W m**-2
-shf = output_surface_physical[:, 11, :, :] (感热通量，向上为正) 单位J m**-2
-lhf = output_surface_physical[:, 10, :, :] (潜热通量，向上为正) 单位J m**-2
-计算能量残差:
+
+**计算各项**:
+```python
+sw_net = output_surface_physical[:, 15, :, :]  # 净表面短波辐射, 索引15=avg_snswrf, 单位W/m²
+lw_net = output_surface_physical[:, 16, :, :]  # 净表面长波辐射, 索引16=avg_snlwrf, 单位W/m²
+shf = output_surface_physical[:, 14, :, :]     # 感热通量, 索引14=sshf, 单位J/m²
+lhf = output_surface_physical[:, 13, :, :]     # 潜热通量, 索引13=slhf, 单位J/m²
+```
+
+**计算能量残差**:
 地表吸收的总能量是 sw_net - lw_net (向下为正)。
 地表释放的总能量是 shf + lhf。
 注意: 您必须根据您使用的数据集（如ERA5）的通量符号约定来确定正确的公式。一个常见的约定是：
+```python
 residual_energy = (sw_net - lw_net) - (shf + lhf)
 loss_energy = MSE(residual_energy, 0)
+```
 
-静力平衡约束 (完全不变)
+### 静力平衡约束实现
+
 静力平衡描述的是在同一时刻，垂直方向上重力和气压梯度力的平衡。它完全不涉及时间变化，因此写法和多时间步时完全一样。
-具体写法:
-所有变量都来自反标准化后的高空输出 output_upper_air_physical。
-选取相邻两层计算 (以850hPa和700hPa为例):
-phi_850 = output_upper_air_physical[:, 0, 4, :, :] 单位m**2 s**-2
-phi_700 = output_upper_air_physical[:, 0, 3, :, :] 单位m**2 s**-2
-temp_850 = output_upper_air_physical[:, 5, 4, :, :] 单位K
-temp_700 = output_upper_air_physical[:, 5, 3, :, :] 单位K
 
-计算模型预测的位势厚度和物理公式计算的位势厚度:
+**具体写法**:
+所有变量都来自反标准化后的高空输出 output_upper_air_physical。
+
+**选取相邻两层计算 (以850hPa和700hPa为例)**:
+```python
+phi_850 = output_upper_air_physical[:, 1, 4, :, :]  # 单位m**2 s**-2, 变量索引1=z, 压力层索引4=850hPa
+phi_700 = output_upper_air_physical[:, 1, 3, :, :]  # 单位m**2 s**-2, 变量索引1=z, 压力层索引3=700hPa
+temp_850 = output_upper_air_physical[:, 2, 4, :, :]  # 单位K, 变量索引2=t, 压力层索引4=850hPa
+temp_700 = output_upper_air_physical[:, 2, 3, :, :]  # 单位K, 变量索引2=t, 压力层索引3=700hPa
+```
+
+**计算模型预测的位势厚度和物理公式计算的位势厚度**:
+```python
 delta_phi_model = phi_700 - phi_850
 temp_avg = (temp_700 + temp_850) / 2
 delta_phi_physical = 287 * temp_avg * (log(850) - log(700))
+```
 (其中 287 是干空气气体常数 Rd)
 
-计算静力平衡残差:
+**计算静力平衡残差**:
+```python
 residual_hydrostatic = delta_phi_model - delta_phi_physical
 loss_pressure = MSE(residual_hydrostatic, 0)
+```
 
-## 评估模式
-### 简单消融实验
-这里训练了3个模型Canglong CanglongV2 CanglongV3
-其中V1没有任何技巧，V2在V1的基础上添加了风向物理信息约束 V3在V2的基础上添加了物理方程约束，V3可看作最终模型。
-我希望绘制一张柱图，X轴是epoch 50 100 150 200，y轴是评分。V3评分减去V2评分，就是物理方程约束的贡献，V2减去V1，就是风向约束的贡献
-每个柱是最终的V3值，但是分三段，分别是基准贡献，风向约束的贡献，物理方程约束的贡献，相加正好是总评分。
-先用data/model_raw_performance.csv的Combined score (mean PCC/ACC)评分
+### 气温局地变化方程约束
+
+### 纳维-斯托克斯方程
+
 
 #### 计算RMSE\ACC\SPEI的同号率
 

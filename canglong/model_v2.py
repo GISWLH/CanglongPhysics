@@ -16,7 +16,18 @@ from .wind_aware_mask import WindAwareAttentionMaskGenerator
 from .wind_aware_block import WindAwareEarthSpecificBlock
 from .helper import ResidualBlock, NonLocalBlock, DownSampleBlock, UpSampleBlock, GroupNorm, Swish
 
-input_constant = torch.load('constant_masks/Earth.pt', weights_only=False).cuda()
+# Lazy loading for input_constant to avoid CUDA initialization at import time
+_input_constant_cache = {}
+
+def get_input_constant(device=None):
+    """Lazy load input_constant tensor"""
+    global _input_constant_cache
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device_key = str(device)
+    if device_key not in _input_constant_cache:
+        _input_constant_cache[device_key] = torch.load('constant_masks/Earth.pt', weights_only=False).to(device)
+    return _input_constant_cache[device_key]
 
 
 class UpSample(nn.Module):
@@ -371,15 +382,19 @@ class CanglongV2(nn.Module):
         
 
         self.conv_constant = nn.Conv2d(in_channels=64, out_channels=96, kernel_size=5, stride=4, padding=2)
-        self.input_constant = input_constant
+        self._input_constant = None  # Lazy loaded
 
 
-    def forward(self, surface, upper_air):        
-        
+    def forward(self, surface, upper_air):
+
         # 计算风向ID
         wind_direction_id = self.wind_direction_processor(surface, upper_air)
-        
-        constant = self.conv_constant(self.input_constant)
+
+        # Lazy load input_constant on first forward pass
+        if self._input_constant is None or self._input_constant.device != surface.device:
+            self._input_constant = get_input_constant(surface.device)
+
+        constant = self.conv_constant(self._input_constant)
         surface = self.encoder3d(surface)
 
         upper_air = self.patchembed4d(upper_air)

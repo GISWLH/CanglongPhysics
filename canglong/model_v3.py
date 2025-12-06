@@ -373,23 +373,9 @@ class CanglongV3(nn.Module):
 
         self.conv_constant = nn.Conv2d(in_channels=64, out_channels=96, kernel_size=5, stride=4, padding=2)
 
-        # 加载 Earth constant 数据（使用相对路径）
-        # 获取当前文件所在目录
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        # 获取项目根目录（canglong文件夹的父目录）
-        project_root = os.path.dirname(current_dir)
-        # 构建Earth.pt的相对路径
-        earth_constant_path = os.path.join(project_root, 'constant_masks', 'Earth.pt')
-
-        if not os.path.exists(earth_constant_path):
-            raise FileNotFoundError(f"❌ Earth constant file not found at {earth_constant_path}")
-
-        try:
-            self.input_constant = torch.load(earth_constant_path, weights_only=True)
-            print(f"✅ Loaded Earth constant from {earth_constant_path}")
-            print(f"   Shape: {self.input_constant.shape}")
-        except Exception as e:
-            raise RuntimeError(f"❌ Failed to load Earth constant: {e}")
+        # 加载 Earth constant 数据
+        earth_path = os.path.join(os.path.dirname(__file__), '..', 'constant_masks', 'Earth.pt')
+        self.input_constant = torch.load(earth_path, weights_only=True)
 
     def forward(self, surface, upper_air):
 

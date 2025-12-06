@@ -24,8 +24,8 @@ def calculate_position_bias_indices(size):
     lon_indices = torch.arange(lon_dim)
 
     # 计算各个维度上的索引组合
-    grid_query = torch.stack(torch.meshgrid([pl_query_indices, lat_query_indices, lon_indices]))
-    grid_key = torch.stack(torch.meshgrid([pl_key_indices, lat_key_indices, lon_indices]))
+    grid_query = torch.stack(torch.meshgrid([pl_query_indices, lat_query_indices, lon_indices], indexing='ij'))
+    grid_key = torch.stack(torch.meshgrid([pl_key_indices, lat_key_indices, lon_indices], indexing='ij'))
     flat_query = torch.flatten(grid_query, 1)
     flat_key = torch.flatten(grid_key, 1)
 
