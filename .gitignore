@@ -8,3 +8,20 @@ code_v2/checkpoints_v3/
 # Ignore large model files (>100MB)
 *.pth
 *.pt
+
+# Ignore large data files
+*.h5
+*.nc
+*.tif
+*.zarr
+data/
+
+# Ignore Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore local settings
+.claude/settings.local.json
