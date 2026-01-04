@@ -1,11 +1,17 @@
+"""
+风向感知的Transformer Block
+在Swin-Transformer基础上，叠加风向驱动的额外移位
+"""
+
 import torch
 import torch.nn as nn
-import numpy as np
 from timm.layers import trunc_normal_, DropPath
+
 from canglong.earth_position import calculate_position_bias_indices
 from canglong.shift_window import create_shifted_window_mask, partition_windows, reverse_partition
 from canglong.pad import calculate_padding_3d
 from canglong.crop import center_crop_3d
+from canglong.wind_aware_shift import WindAwareDoubleShifter
 
 
 class WindAwareEarthAttention3D(nn.Module):
@@ -53,8 +59,7 @@ class WindAwareEarthAttention3D(nn.Module):
             self.window_size[0] * self.window_size[1] * self.window_size[2],
             self.type_of_windows, -1
         )
-        earth_position_bias = earth_position_bias.permute(
-            3, 2, 0, 1).contiguous()
+        earth_position_bias = earth_position_bias.permute(3, 2, 0, 1).contiguous()
         attn = attn + earth_position_bias.unsqueeze(0)
 
         if mask is not None:
@@ -75,12 +80,19 @@ class WindAwareEarthAttention3D(nn.Module):
 
 class WindAwareEarthSpecificBlock(nn.Module):
     """
-    3D Transformer Block，支持基于风向的动态窗口交换
+    3D Transformer Block，支持基于风向的双重移位：
+    1. Swin固定移位（奇数块）
+    2. 风向额外移位（所有块）
+
+    支持两种风向移位模式：
+    - 'global': 全局主导风向（整个batch一个方向）
+    - 'regional': 分区域独立风向（4x8=32个区域各自方向）
     """
 
     def __init__(self, dim, input_resolution, num_heads, window_size=None, shift_size=None, mlp_ratio=4.,
                  qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0., act_layer=nn.GELU,
-                 norm_layer=nn.LayerNorm, use_wind_aware_shift=True):
+                 norm_layer=nn.LayerNorm, use_wind_aware_shift=True, wind_shift_scale=2,
+                 wind_shift_mode='regional', num_regions=(4, 8)):
         super().__init__()
         window_size = (2, 6, 12) if window_size is None else window_size
         shift_size = (1, 3, 6) if shift_size is None else shift_size
@@ -90,7 +102,8 @@ class WindAwareEarthSpecificBlock(nn.Module):
         self.window_size = window_size
         self.shift_size = shift_size
         self.mlp_ratio = mlp_ratio
-        self.use_wind_aware_shift = use_wind_aware_shift  # 是否使用风向感知的窗口交换
+        self.use_wind_aware_shift = use_wind_aware_shift
+        self.wind_shift_mode = wind_shift_mode
 
         self.norm1 = norm_layer(dim)
         padding = calculate_padding_3d(input_resolution, window_size)
@@ -108,8 +121,7 @@ class WindAwareEarthSpecificBlock(nn.Module):
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
-        
-        # 简化MLP实现
+
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = nn.Sequential(
             nn.Linear(dim, mlp_hidden_dim),
@@ -119,20 +131,30 @@ class WindAwareEarthSpecificBlock(nn.Module):
             nn.Dropout(drop)
         )
 
+        # 判断是否需要Swin移位（奇数块需要）
         shift_pl, shift_lat, shift_lon = self.shift_size
-        self.roll = shift_pl and shift_lon and shift_lat
+        self.do_swin_shift = (shift_pl != 0) or (shift_lat != 0) or (shift_lon != 0)
 
-        if self.roll and not self.use_wind_aware_shift:
+        # 双重移位器（支持全局/分区域模式）
+        if self.use_wind_aware_shift:
+            self.double_shifter = WindAwareDoubleShifter(
+                swin_shift_size=self.shift_size,
+                wind_shift_scale=wind_shift_scale,
+                mode=wind_shift_mode,
+                num_regions=num_regions
+            )
+
+        # 注意力掩码（仅Swin移位时需要）
+        if self.do_swin_shift:
             attn_mask = create_shifted_window_mask(pad_resolution, window_size, shift_size)
         else:
             attn_mask = None
-
         self.register_buffer("attn_mask", attn_mask)
 
     def forward(self, x: torch.Tensor, wind_direction_id=None):
         """
         前向传播
-        
+
         参数:
             x (torch.Tensor): 输入特征, 形状为 (B, L, C)
             wind_direction_id (torch.Tensor, optional): 风向ID, 形状为 (B, H, W)
@@ -145,88 +167,51 @@ class WindAwareEarthSpecificBlock(nn.Module):
         x = self.norm1(x)
         x = x.view(B, Pl, Lat, Lon, C)
 
+        # Padding
         x = self.pad(x.permute(0, 4, 1, 2, 3)).permute(0, 2, 3, 4, 1)
-
         _, Pl_pad, Lat_pad, Lon_pad, _ = x.shape
 
-        shift_pl, shift_lat, shift_lon = self.shift_size
-        
-        # 简化实现：暂时不使用风向感知的窗口交换，使用传统的固定窗口交换
-        if self.roll:
-            # 使用传统的固定窗口交换
-            shifted_x = torch.roll(x, shifts=(-shift_pl, -shift_lat, -shift_lon), dims=(1, 2, 3))
-            x_windows = partition_windows(shifted_x, self.window_size)
-        else:
-            # 不进行窗口交换
-            shifted_x = x
-            x_windows = partition_windows(shifted_x, self.window_size)
+        # === 双重移位 ===
+        if self.use_wind_aware_shift and wind_direction_id is not None:
+            # 使用风向感知的双重移位
+            x, dominant_id = self.double_shifter.forward_shift(
+                x, wind_direction_id, do_swin_shift=self.do_swin_shift
+            )
+        elif self.do_swin_shift:
+            # 仅使用Swin固定移位
+            shift_pl, shift_lat, shift_lon = self.shift_size
+            x = torch.roll(x, shifts=(-shift_pl, -shift_lat, -shift_lon), dims=(1, 2, 3))
 
+        # 窗口分割
+        x_windows = partition_windows(x, self.window_size)
         win_pl, win_lat, win_lon = self.window_size
         x_windows = x_windows.view(x_windows.shape[0], x_windows.shape[1], win_pl * win_lat * win_lon, C)
 
+        # 注意力计算
         attn_windows = self.attn(x_windows, mask=self.attn_mask)
 
+        # 窗口重组
         attn_windows = attn_windows.view(attn_windows.shape[0], attn_windows.shape[1], win_pl, win_lat, win_lon, C)
+        x = reverse_partition(attn_windows, self.window_size, Pl_pad, Lat_pad, Lon_pad)
 
-        if self.roll:
-            # 使用传统的固定窗口交换反向操作
-            shifted_x = reverse_partition(attn_windows, self.window_size, Pl_pad, Lat_pad, Lon_pad)
-            x = torch.roll(shifted_x, shifts=(shift_pl, shift_lat, shift_lon), dims=(1, 2, 3))
-        else:
-            # 不进行窗口交换的反向操作
-            shifted_x = reverse_partition(attn_windows, self.window_size, Pl_pad, Lat_pad, Lon_pad)
-            x = shifted_x
+        # === 反向双重移位 ===
+        if self.use_wind_aware_shift and wind_direction_id is not None:
+            # 反向风向感知的双重移位
+            x = self.double_shifter.backward_shift(
+                x, wind_direction_id, do_swin_shift=self.do_swin_shift
+            )
+        elif self.do_swin_shift:
+            # 仅反向Swin移位
+            shift_pl, shift_lat, shift_lon = self.shift_size
+            x = torch.roll(x, shifts=(shift_pl, shift_lat, shift_lon), dims=(1, 2, 3))
 
+        # Crop回原始尺寸
         x = center_crop_3d(x.permute(0, 4, 1, 2, 3), self.input_resolution).permute(0, 2, 3, 4, 1)
 
         x = x.reshape(B, Pl * Lat * Lon, C)
         x = shortcut + self.drop_path(x)
 
+        # MLP
         x = x + self.drop_path(self.mlp(self.norm2(x)))
 
-        return x
-
-    def _wind_aware_shift_and_partition(self, x, wind_direction_id):
-        """
-        根据风向ID进行动态窗口交换和分割
-        
-        参数:
-            x (torch.Tensor): 输入张量, 形状为 (B, Pl, Lat, Lon, C)
-            wind_direction_id (torch.Tensor): 风向ID, 形状为 (B, H, W)
-            
-        返回:
-            windows (torch.Tensor): 窗口分割后的张量
-        """
-        B, Pl, Lat, Lon, C = x.shape
-        
-        # 根据风向ID进行窗口交换
-        # 这里简化实现，实际应用中可以根据wind_direction_id进行更复杂的移位操作
-        shift_pl, shift_lat, shift_lon = self.shift_size
-        shifted_x = torch.roll(x, shifts=(-shift_pl, -shift_lat, -shift_lon), dims=(1, 2, 3))
-        
-        # 分割窗口
-        x_windows = partition_windows(shifted_x, self.window_size)
-        return x_windows
-
-    def _wind_aware_reverse_partition(self, windows, Pl_pad, Lat_pad, Lon_pad, wind_direction_id):
-        """
-        根据风向ID进行动态窗口重组
-        
-        参数:
-            windows (torch.Tensor): 窗口分割后的张量
-            Pl_pad (int): 填充后的压力层维度
-            Lat_pad (int): 填充后的纬度维度
-            Lon_pad (int): 填充后的经度维度
-            wind_direction_id (torch.Tensor): 风向ID, 形状为 (B, H, W)
-            
-        返回:
-            x (torch.Tensor): 重组后的张量
-        """
-        # 重组窗口
-        shifted_x = reverse_partition(windows, self.window_size, Pl_pad, Lat_pad, Lon_pad)
-        
-        # 根据风向ID进行反向窗口交换
-        # 这里简化实现，实际应用中可以根据wind_direction_id进行更复杂的移位操作
-        shift_pl, shift_lat, shift_lon = self.shift_size
-        x = torch.roll(shifted_x, shifts=(shift_pl, shift_lat, shift_lon), dims=(1, 2, 3))
         return x

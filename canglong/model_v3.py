@@ -114,30 +114,34 @@ class BasicLayer(nn.Module):
     """A basic 3D Transformer layer for one stage"""
 
     def __init__(self, dim, input_resolution, depth, num_heads, window_size, mlp_ratio=4., qkv_bias=True, qk_scale=None,
-                 drop=0., attn_drop=0., drop_path=0., norm_layer=nn.LayerNorm, use_wind_aware_shift=True):
+                 drop=0., attn_drop=0., drop_path=0., norm_layer=nn.LayerNorm, use_wind_aware_shift=True,
+                 wind_shift_mode='regional', num_regions=(4, 8), wind_shift_scale=2):
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution
         self.depth = depth
 
-        # 风向感知的注意力掩码生成器
+        # 风向感知的注意力掩码生成器（保留但不再使用）
         self.wind_aware_mask_generator = WindAwareAttentionMaskGenerator(input_resolution, window_size) if use_wind_aware_shift else None
 
         self.blocks = nn.ModuleList([
             WindAwareEarthSpecificBlock(
-                dim=dim, 
-                input_resolution=input_resolution, 
-                num_heads=num_heads, 
+                dim=dim,
+                input_resolution=input_resolution,
+                num_heads=num_heads,
                 window_size=window_size,
                 shift_size=(0, 0, 0) if i % 2 == 0 else (window_size[0]//2, window_size[1]//2, window_size[2]//2),
-                mlp_ratio=mlp_ratio, 
+                mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias,
-                qk_scale=qk_scale, 
-                drop=drop, 
+                qk_scale=qk_scale,
+                drop=drop,
                 attn_drop=attn_drop,
                 drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
                 norm_layer=norm_layer,
-                use_wind_aware_shift=use_wind_aware_shift
+                use_wind_aware_shift=use_wind_aware_shift,
+                wind_shift_mode=wind_shift_mode,
+                num_regions=num_regions,
+                wind_shift_scale=wind_shift_scale
             )
             for i in range(depth)
         ])
@@ -320,6 +324,11 @@ class CanglongV3(nn.Module):
         )
         self.encoder3d = Encoder(image_channels=26, latent_dim=96)
 
+        # 风向移位参数：分区域模式，4x8=32个区域
+        wind_shift_mode = 'regional'
+        num_regions = (4, 8)  # 纬度4区域 x 经度8区域
+        wind_shift_scale = 2  # 移位幅度
+
         self.layer1 = BasicLayer(
             dim=embed_dim,
             input_resolution=(6, 181, 360),
@@ -327,7 +336,10 @@ class CanglongV3(nn.Module):
             num_heads=num_heads[0],
             window_size=window_size,
             drop_path=drop_path[:2],
-            use_wind_aware_shift=True  # 启用风向感知的窗口交换
+            use_wind_aware_shift=True,
+            wind_shift_mode=wind_shift_mode,
+            num_regions=num_regions,
+            wind_shift_scale=wind_shift_scale
         )
         self.downsample = DownSample(in_dim=embed_dim, input_resolution=(6, 181, 360), output_resolution=(6, 91, 180))
         self.layer2 = BasicLayer(
@@ -337,7 +349,10 @@ class CanglongV3(nn.Module):
             num_heads=num_heads[1],
             window_size=window_size,
             drop_path=drop_path[2:],
-            use_wind_aware_shift=True  # 启用风向感知的窗口交换
+            use_wind_aware_shift=True,
+            wind_shift_mode=wind_shift_mode,
+            num_regions=num_regions,
+            wind_shift_scale=wind_shift_scale
         )
         self.layer3 = BasicLayer(
             dim=embed_dim * 2,
@@ -346,7 +361,10 @@ class CanglongV3(nn.Module):
             num_heads=num_heads[2],
             window_size=window_size,
             drop_path=drop_path[2:],
-            use_wind_aware_shift=True  # 启用风向感知的窗口交换
+            use_wind_aware_shift=True,
+            wind_shift_mode=wind_shift_mode,
+            num_regions=num_regions,
+            wind_shift_scale=wind_shift_scale
         )
         self.upsample = UpSample(embed_dim * 2, embed_dim, (6, 91, 180), (6, 181, 360))
         self.layer4 = BasicLayer(
@@ -356,7 +374,10 @@ class CanglongV3(nn.Module):
             num_heads=num_heads[3],
             window_size=window_size,
             drop_path=drop_path[:2],
-            use_wind_aware_shift=True  # 启用风向感知的窗口交换
+            use_wind_aware_shift=True,
+            wind_shift_mode=wind_shift_mode,
+            num_regions=num_regions,
+            wind_shift_scale=wind_shift_scale
         )
         self.patchrecovery2d = RecoveryImage2D((721, 1440), (4, 4), 2 * embed_dim, 4) #8, 8
         self.decoder3d = Decoder(image_channels=26, latent_dim=2 * 96)
@@ -377,8 +398,19 @@ class CanglongV3(nn.Module):
         earth_path = os.path.join(os.path.dirname(__file__), '..', 'constant_masks', 'Earth.pt')
         self.input_constant = torch.load(earth_path, weights_only=True)
 
-    def forward(self, surface, upper_air):
+    def forward(self, surface, upper_air, return_wind_info=False):
+        """
+        前向传播
 
+        参数:
+            surface: 表面数据 (B, 26, 2, 721, 1440)
+            upper_air: 高空数据 (B, 10, 5, 2, 721, 1440)
+            return_wind_info: 是否返回风向信息用于监控
+
+        返回:
+            output_surface, output_upper_air
+            如果return_wind_info=True, 还返回wind_direction_id
+        """
         # 计算风向ID
         wind_direction_id = self.wind_direction_processor(surface, upper_air)
 
@@ -392,18 +424,18 @@ class CanglongV3(nn.Module):
 
         upper_air_encoded = self.patchembed4d(upper_air)
 
-        
-        x = torch.concat([upper_air_encoded.squeeze(3), 
-                          surface_encoded, 
+
+        x = torch.concat([upper_air_encoded.squeeze(3),
+                          surface_encoded,
                           constant.unsqueeze(2)], dim=2)
 
-        
+
         B, C, Pl, Lat, Lon = x.shape
 
         x = x.reshape(B, C, -1).transpose(1, 2)
-        
-        # 传递风向ID到各层
-        x = self.layer1(x, wind_direction_id) #revise
+
+        # 传递风向ID到各层（风向感知的双重移位）
+        x = self.layer1(x, wind_direction_id)
 
         skip = x
 
@@ -415,12 +447,14 @@ class CanglongV3(nn.Module):
 
         output = torch.concat([x, skip], dim=-1)
         output = output.transpose(1, 2).reshape(B, -1, Pl, Lat, Lon)
-        output_surface = output[:, :, 3:5, :, :]  #  四五层是surface
+        output_surface = output[:, :, 3:5, :, :]  # 四五层是surface
         output_upper_air = output[:, :, 0:3, :, :]  # 前三层是upper air
 
 
         output_surface = self.decoder3d(output_surface)
         output_upper_air = self.patchrecovery4d(output_upper_air.unsqueeze(3))
 
+        if return_wind_info:
+            return output_surface, output_upper_air, wind_direction_id
         return output_surface, output_upper_air
 

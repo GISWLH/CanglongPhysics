@@ -100,28 +100,29 @@ class WindDirectionProcessor(nn.Module):
     def forward(self, surface, upper_air):
         """
         从surface和upper_air数据中提取风向信息并计算主导风向
-        
+
         参数:
-            surface (torch.Tensor): 表面数据, 形状为 (B, 17, 2, 721, 1440)
-            upper_air (torch.Tensor): 高空数据, 形状为 (B, 7, 5, 2, 721, 1440)
-            
+            surface (torch.Tensor): 表面数据, 形状为 (B, 26, 2, 721, 1440)
+            upper_air (torch.Tensor): 高空数据, 形状为 (B, 10, 5, 2, 721, 1440)
+
         返回:
-            wind_direction_id (torch.Tensor): 风向ID, 形状为 (B, 181, 360)
+            wind_direction_id (torch.Tensor): 风向ID, 形状为 (B, H', W')
         """
-        B, _, _, _, H, W = upper_air.shape
-        
+        B = surface.shape[0]
+
         # 提取高空u/v风场数据
-        # upper_air shape: (B, 7, 5, 2, 721, 1440)
-        # 提取第3,4层: upper_air[:, :, 2:4, :, :, :]
-        upper_u = upper_air[:, :, 3, :, :, :]  # (B, 7, 2, 721, 1440)
-        upper_v = upper_air[:, :, 4, :, :, :]  # (B, 7, 2, 721, 1440)
-        
-        # 提取表面10m u/v风场数据 
-        # surface shape: (B, 17, 2, 721, 1440)
+        # upper_air shape: (B, 10, 5, 2, 721, 1440)
+        # 变量索引: 3=u, 4=v
+        upper_u = upper_air[:, 3, :, :, :, :]  # (B, 5, 2, 721, 1440)
+        upper_v = upper_air[:, 4, :, :, :, :]  # (B, 5, 2, 721, 1440)
+
+        # 提取表面10m u/v风场数据
+        # surface shape: (B, 26, 2, 721, 1440)
+        # 索引: 7=u10, 8=v10
         surface_u = surface[:, 7, :, :, :]  # (B, 2, 721, 1440)
         surface_v = surface[:, 8, :, :, :]  # (B, 2, 721, 1440)
-        
-        # 合并高空和表面风场数据 (取时间维度的平均)
+
+        # 合并高空和表面风场数据 (取时间维度和压力层的平均)
         # 对于高空数据，取所有压力层的平均
         upper_u_mean = upper_u.mean(dim=1)  # (B, 2, 721, 1440)
         upper_v_mean = upper_v.mean(dim=1)  # (B, 2, 721, 1440)
