@@ -21,6 +21,7 @@ Example usage:
 # Import the main model
 from .model_v1 import Canglong
 from .model_v2 import CanglongV2
+from .model_v2_1 import CanglongV2_1
 from .model_v3 import CanglongV3
 
 # Import utility functions if needed
@@ -38,6 +39,9 @@ __author__ = 'CAS-Canglong Team'
 # Define what gets imported with "from canglong import *"
 __all__ = [
     'Canglong',
+    'CanglongV2',
+    'CanglongV2_1',
+    'CanglongV3',
     'calculate_position_bias_indices',
     'create_shifted_window_mask',
     'partition_windows',
