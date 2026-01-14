@@ -49,7 +49,8 @@ class WindAwareEarthSpecificBlockV2_1(nn.Module):
 
     def __init__(self, dim, input_resolution, num_heads, window_size=None, shift_size=None, mlp_ratio=4.,
                  qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0., act_layer=nn.GELU,
-                 norm_layer=nn.LayerNorm, use_wind_aware_shift=True, wind_shift_scale=2):
+                 norm_layer=nn.LayerNorm, use_wind_aware_shift=True, wind_shift_scale=2,
+                 max_wind_dirs=None):
         super().__init__()
         window_size = (2, 6, 12) if window_size is None else window_size
         shift_size = (1, 3, 6) if shift_size is None else shift_size
@@ -61,6 +62,7 @@ class WindAwareEarthSpecificBlockV2_1(nn.Module):
         self.mlp_ratio = mlp_ratio
         self.use_wind_aware_shift = use_wind_aware_shift
         self.wind_shift_scale = wind_shift_scale
+        self.max_wind_dirs = max_wind_dirs
         self._attn_mask_cache = {}
 
         self.norm1 = norm_layer(dim)
@@ -109,6 +111,29 @@ class WindAwareEarthSpecificBlockV2_1(nn.Module):
         if wind_map.shape[-2:] != (num_lat, num_lon):
             wind_map = F.interpolate(wind_map.unsqueeze(1).float(), size=(num_lat, num_lon), mode='nearest')
             wind_map = wind_map.squeeze(1).long()
+        return wind_map
+
+    def _limit_wind_dirs(self, wind_map):
+        if not self.max_wind_dirs or self.max_wind_dirs <= 0:
+            return torch.zeros_like(wind_map)
+        if self.max_wind_dirs >= 8:
+            return wind_map
+
+        flat = wind_map.view(-1)
+        counts = torch.bincount(flat, minlength=9)
+        nonzero_counts = counts[1:]
+        if nonzero_counts.sum() == 0:
+            return torch.zeros_like(wind_map)
+
+        k = min(self.max_wind_dirs, 8)
+        topk = torch.topk(nonzero_counts, k=k).indices + 1
+
+        allowed = torch.zeros(9, device=wind_map.device, dtype=torch.bool)
+        allowed[0] = True
+        allowed[topk] = True
+
+        mask = allowed[wind_map]
+        wind_map = torch.where(mask, wind_map, torch.zeros_like(wind_map))
         return wind_map
 
     def _clamp_shift(self, shift, window):
@@ -164,7 +189,11 @@ class WindAwareEarthSpecificBlockV2_1(nn.Module):
         num_lat = Lat_pad // win_lat
         num_lon = Lon_pad // win_lon
 
+        if not self.use_wind_aware_shift:
+            wind_direction_id = None
+
         wind_map = self._normalize_wind_map(wind_direction_id, num_lat, num_lon, x.device)
+        wind_map = self._limit_wind_dirs(wind_map)
         if wind_map.shape[0] == 1 and B > 1:
             wind_map = wind_map.expand(B, -1, -1)
 

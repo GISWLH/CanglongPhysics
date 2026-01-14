@@ -1,0 +1,13 @@
+# v2_2 aligned benchmark
+- epochs: 3
+- num_workers: 16
+- batch_size: 1
+- amp: true
+- max_wind_dirs: 4
+- train_avg_epoch_s: 91.22
+- train_avg_step_s: 3.51
+- train_peak_alloc_gb: 31.25
+- train_peak_reserved_gb: 45.07
+- valid_avg_epoch_s: 29.52
+- valid_peak_alloc_gb: 10.16
+- valid_peak_reserved_gb: 45.07

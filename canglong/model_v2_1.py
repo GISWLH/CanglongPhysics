@@ -98,7 +98,7 @@ class BasicLayerV2_1(nn.Module):
 
     def __init__(self, dim, input_resolution, depth, num_heads, window_size, mlp_ratio=4., qkv_bias=True, qk_scale=None,
                  drop=0., attn_drop=0., drop_path=0., norm_layer=nn.LayerNorm, use_wind_aware_shift=True,
-                 wind_shift_scale=2):
+                 wind_shift_scale=2, max_wind_dirs=None):
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution
@@ -119,7 +119,8 @@ class BasicLayerV2_1(nn.Module):
                 drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
                 norm_layer=norm_layer,
                 use_wind_aware_shift=use_wind_aware_shift,
-                wind_shift_scale=wind_shift_scale
+                wind_shift_scale=wind_shift_scale,
+                max_wind_dirs=max_wind_dirs
             )
             for i in range(depth)
         ])
@@ -220,7 +221,7 @@ class CanglongV2_1(nn.Module):
     """
 
     def __init__(self, embed_dim=96, num_heads=(8, 16, 16, 8), window_size=(2, 6, 12),
-                 wind_shift_scale=2, wind_speed_threshold=0.5, norm_json=None,
+                 wind_shift_scale=2, wind_speed_threshold=0.5, max_wind_dirs=1, norm_json=None,
                  surface_mean=None, surface_std=None, upper_mean=None, upper_std=None):
         super().__init__()
         drop_path = np.linspace(0, 0.2, 8).tolist()
@@ -248,7 +249,8 @@ class CanglongV2_1(nn.Module):
             window_size=window_size,
             drop_path=drop_path[:2],
             use_wind_aware_shift=True,
-            wind_shift_scale=wind_shift_scale
+            wind_shift_scale=wind_shift_scale,
+            max_wind_dirs=max_wind_dirs
         )
         self.downsample = DownSample(in_dim=embed_dim, input_resolution=(6, 181, 360), output_resolution=(6, 91, 180))
         self.layer2 = BasicLayerV2_1(
@@ -258,8 +260,9 @@ class CanglongV2_1(nn.Module):
             num_heads=num_heads[1],
             window_size=window_size,
             drop_path=drop_path[2:],
-            use_wind_aware_shift=True,
-            wind_shift_scale=wind_shift_scale
+            use_wind_aware_shift=False,
+            wind_shift_scale=wind_shift_scale,
+            max_wind_dirs=max_wind_dirs
         )
         self.layer3 = BasicLayerV2_1(
             dim=embed_dim * 2,
@@ -268,8 +271,9 @@ class CanglongV2_1(nn.Module):
             num_heads=num_heads[2],
             window_size=window_size,
             drop_path=drop_path[2:],
-            use_wind_aware_shift=True,
-            wind_shift_scale=wind_shift_scale
+            use_wind_aware_shift=False,
+            wind_shift_scale=wind_shift_scale,
+            max_wind_dirs=max_wind_dirs
         )
         self.upsample = UpSample(embed_dim * 2, embed_dim, (6, 91, 180), (6, 181, 360))
         self.layer4 = BasicLayerV2_1(
@@ -279,8 +283,9 @@ class CanglongV2_1(nn.Module):
             num_heads=num_heads[3],
             window_size=window_size,
             drop_path=drop_path[:2],
-            use_wind_aware_shift=True,
-            wind_shift_scale=wind_shift_scale
+            use_wind_aware_shift=False,
+            wind_shift_scale=wind_shift_scale,
+            max_wind_dirs=max_wind_dirs
         )
         self.decoder3d = Decoder(image_channels=26, latent_dim=2 * 96)
         self.patchrecovery4d = RecoveryImage4D(

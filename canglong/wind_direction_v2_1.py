@@ -2,8 +2,6 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 
-from canglong.pad import calculate_padding_2d
-
 
 def _angle_to_direction_id(angle_deg):
     """
@@ -24,6 +22,37 @@ def _angle_to_direction_id(angle_deg):
     return direction_id
 
 
+def _calculate_padding_2d(target_size, window_size):
+    """
+    Calculate 2D padding to make target_size divisible by window_size.
+
+    Returns:
+        (pad_left, pad_right, pad_top, pad_bottom) for F.pad
+    """
+    Lat, Lon = target_size
+    win_lat, win_lon = window_size
+
+    # Latitude padding (top/bottom)
+    lat_mod = Lat % win_lat
+    if lat_mod:
+        lat_pad_total = win_lat - lat_mod
+        pad_top = lat_pad_total // 2
+        pad_bottom = lat_pad_total - pad_top
+    else:
+        pad_top = pad_bottom = 0
+
+    # Longitude padding (left/right)
+    lon_mod = Lon % win_lon
+    if lon_mod:
+        lon_pad_total = win_lon - lon_mod
+        pad_left = lon_pad_total // 2
+        pad_right = lon_pad_total - pad_left
+    else:
+        pad_left = pad_right = 0
+
+    return (pad_left, pad_right, pad_top, pad_bottom)
+
+
 class WindDirectionProcessorV2_1(torch.nn.Module):
     """
     Window-level wind direction processor for V2.1.
@@ -38,7 +67,7 @@ class WindDirectionProcessorV2_1(torch.nn.Module):
         self.window_size = window_size
         self.target_size = target_size
         self.wind_speed_threshold = wind_speed_threshold
-        self.pad = calculate_padding_2d(target_size, window_size)
+        self.pad = _calculate_padding_2d(target_size, window_size)
 
     def forward(self, surface, upper_air,
                 surface_uv_mean=None, surface_uv_std=None,

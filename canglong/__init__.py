@@ -22,6 +22,10 @@ Example usage:
 from .model_v1 import Canglong
 from .model_v2 import CanglongV2
 from .model_v2_1 import CanglongV2_1
+from .model_v2_2 import CanglongV2_2
+from .model_v2_3 import CanglongV2_3
+from .model_v2_4 import CanglongV2_4
+from .model_v2_5 import CanglongV2_5
 from .model_v3 import CanglongV3
 
 # Import utility functions if needed
@@ -41,6 +45,10 @@ __all__ = [
     'Canglong',
     'CanglongV2',
     'CanglongV2_1',
+    'CanglongV2_2',
+    'CanglongV2_3',
+    'CanglongV2_4',
+    'CanglongV2_5',
     'CanglongV3',
     'calculate_position_bias_indices',
     'create_shifted_window_mask',
