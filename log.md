@@ -110,6 +110,22 @@ Average grouped RMSE(norm.) (precip/t2m/d2m/u200/u850): 0.649376
 Average surface RMSE(norm.):  0.787943
 Average upper-air RMSE(norm.):0.692333
 
+# V2_5 正式test1 2ep
+Test set summary (precipitation & key variables):
+Average precip PCC:  0.661558
+Average precip ACC:  0.660636
+Average precip RMSE (norm.): 1.435397
+Combined score (mean PCC/ACC): 0.661097
+Average avg_tnlwrf PCC: 0.928277, RMSE(norm.): 0.348046
+Average t2m PCC:       0.985367, RMSE(norm.): 0.196234
+Average d2m PCC:       0.980697, RMSE(norm.): 0.186326
+Average u200 PCC:      0.829609, RMSE(norm.): 0.544677
+Average u850 PCC:      0.815207, RMSE(norm.): 0.597635
+Average grouped PCC (precip/t2m/d2m/u200/u850): 0.854488
+Average grouped RMSE(norm.) (precip/t2m/d2m/u200/u850): 0.592054
+Average surface RMSE(norm.):  0.519407
+Average upper-air RMSE(norm.):0.683864
+
 (torch) root@gz-ins-760323423171781:/home/CanglongPhysics# python train_v2_3.py
 Using device: cuda
 Loading data...

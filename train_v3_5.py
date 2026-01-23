@@ -4,20 +4,22 @@ V3.5: V2.5 backbone + physical constraints from train_v3
 """
 
 import argparse
+import json
 import math
 import os
 import sys
+import time
 from bisect import bisect_right
 from pathlib import Path
 
-import h5py as h5
 import numpy as np
+import numcodecs
 import torch
 import torch.distributed as dist
 from torch import nn
 import torch.optim as optim
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 from torch.utils.data.distributed import DistributedSampler
 from torch.amp import autocast, GradScaler
 from tqdm import tqdm
@@ -27,8 +29,8 @@ from canglong.wind_aware_shift import WIND_DIR_NAMES, get_dominant_direction
 
 
 # ============ Debug switches ============
-DEBUG_NAN = True
-STOP_ON_NAN = True
+DEBUG_NAN = False
+STOP_ON_NAN = False
 MAX_NAN_REPORTS = 5
 IS_MAIN = True
 
@@ -49,6 +51,28 @@ def _nonfinite_channels(tensor):
     bad = bad.reshape(bad.shape[0], bad.shape[1], -1)
     bad_any = bad.any(dim=-1).any(dim=0)
     return torch.nonzero(bad_any, as_tuple=False).flatten().tolist()
+
+
+def _read_rss_mb():
+    rss_kb = 0
+    try:
+        with open(f"/proc/{os.getpid()}/status", "r") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        rss_kb = int(parts[1])
+                    break
+    except FileNotFoundError:
+        return 0.0
+    return rss_kb / 1024.0
+
+
+def _fd_count():
+    try:
+        return len(os.listdir(f"/proc/{os.getpid()}/fd"))
+    except Exception:
+        return -1
 
 
 # ============ 常量掩码缓存 ============
@@ -558,49 +582,100 @@ def calculate_tweedie_loss(output_surface_norm, target_surface_norm,
     return loss_lsrr + loss_crr
 
 
-class WeatherDataset(Dataset):
-    def __init__(self, data_paths):
-        if isinstance(data_paths, (str, Path)):
-            data_paths = [data_paths]
-        self.data_paths = [str(p) for p in data_paths]
-        self._h5_files = {}
-        self._surface_data = {}
-        self._upper_air_data = {}
+def _load_zarr_json(path):
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+def _build_blosc(codecs):
+    blosc_cfg = None
+    for codec in codecs:
+        if codec.get("name") == "blosc":
+            blosc_cfg = codec.get("configuration", {})
+            break
+    if not blosc_cfg:
+        return None
+    shuffle = blosc_cfg.get("shuffle", 1)
+    if shuffle == "shuffle":
+        shuffle = 1
+    elif shuffle == "bitshuffle":
+        shuffle = 2
+    elif shuffle == "noshuffle":
+        shuffle = 0
+    return numcodecs.Blosc(
+        cname=blosc_cfg.get("cname", "lz4"),
+        clevel=blosc_cfg.get("clevel", 5),
+        shuffle=shuffle,
+        blocksize=blosc_cfg.get("blocksize", 0)
+    )
+
+
+class ZarrArraySpec:
+    def __init__(self, store_path, name):
+        meta = _load_zarr_json(os.path.join(store_path, name, "zarr.json"))
+        self.shape = tuple(meta["shape"])
+        self.chunk_shape = tuple(meta["chunk_grid"]["configuration"]["chunk_shape"])
+        if self.chunk_shape[0] != 1:
+            raise ValueError(f"{name} time chunk must be 1, got {self.chunk_shape[0]}")
+        self.dtype = np.dtype(meta["data_type"])
+        endian = None
+        for codec in meta.get("codecs", []):
+            if codec.get("name") == "bytes":
+                endian = codec.get("configuration", {}).get("endian", "little")
+                break
+        if endian == "little":
+            self.dtype = self.dtype.newbyteorder("<")
+        elif endian == "big":
+            self.dtype = self.dtype.newbyteorder(">")
+        self.compressor = _build_blosc(meta.get("codecs", []))
+        self.array_dir = os.path.join(store_path, name)
+        self.chunk_tail = ["0"] * (len(self.shape) - 1)
+
+    def read_time_chunk(self, t_idx):
+        chunk_path = os.path.join(self.array_dir, "c", str(t_idx), *self.chunk_tail)
+        with open(chunk_path, "rb") as f:
+            raw = f.read()
+        if self.compressor:
+            raw = self.compressor.decode(raw)
+        arr = np.frombuffer(raw, dtype=self.dtype).reshape(self.chunk_shape)
+        return arr
+
+
+def _read_time_array(store_path):
+    meta = _load_zarr_json(os.path.join(store_path, "time", "zarr.json"))
+    dtype = np.dtype(meta["data_type"])
+    endian = None
+    for codec in meta.get("codecs", []):
+        if codec.get("name") == "bytes":
+            endian = codec.get("configuration", {}).get("endian", "little")
+            break
+    if endian == "little":
+        dtype = dtype.newbyteorder("<")
+    elif endian == "big":
+        dtype = dtype.newbyteorder(">")
+    compressor = _build_blosc(meta.get("codecs", []))
+    chunk_path = os.path.join(store_path, "time", "c", "0")
+    with open(chunk_path, "rb") as f:
+        raw = f.read()
+    if compressor:
+        raw = compressor.decode(raw)
+    return np.frombuffer(raw, dtype=dtype)
+
+
+class ZarrDataset(Dataset):
+    def __init__(self, store_specs):
         self._nan_reports = 0
-
+        self.store_specs = []
         counts = []
-        valid_paths = []
-        for path in self.data_paths:
-            with h5.File(path, 'r') as data_file:
-                total = data_file['surface'].shape[0]
-            count = max(total - 2, 0)
-            if count <= 0:
-                if IS_MAIN:
-                    print(f"Skipping {path}: not enough timesteps ({total})")
+        for spec in store_specs:
+            if spec["count"] <= 0:
                 continue
-            counts.append(count)
-            valid_paths.append(path)
-
-        self.data_paths = valid_paths
-        self._counts = counts
-        self._offsets = np.cumsum([0] + self._counts).tolist()
-        self.length = int(self._offsets[-1])
+            self.store_specs.append(spec)
+            counts.append(spec["count"])
+        self._offsets = np.cumsum([0] + counts).tolist()
+        self.length = int(self._offsets[-1]) if self._offsets else 0
         if IS_MAIN:
-            print(f"Dataset files: {len(self.data_paths)}, sample count: {self.length}")
-
-    def _ensure_open(self, file_idx):
-        if file_idx not in self._h5_files:
-            h5_file = h5.File(self.data_paths[file_idx], 'r')
-            self._h5_files[file_idx] = h5_file
-            self._surface_data[file_idx] = h5_file['surface']
-            self._upper_air_data[file_idx] = h5_file['upper_air']
-
-    def __del__(self):
-        for h5_file in self._h5_files.values():
-            try:
-                h5_file.close()
-            except Exception:
-                pass
+            print(f"Dataset stores: {len(self.store_specs)}, sample count: {self.length}")
 
     def __len__(self):
         return self.length
@@ -609,36 +684,45 @@ class WeatherDataset(Dataset):
         if idx < 0 or idx >= self.length:
             raise IndexError(f"Index {idx} out of range for dataset length {self.length}")
 
-        file_idx = bisect_right(self._offsets, idx) - 1
-        local_idx = idx - self._offsets[file_idx]
-        self._ensure_open(file_idx)
-        file_name = os.path.basename(self.data_paths[file_idx])
+        store_idx = bisect_right(self._offsets, idx) - 1
+        local_idx = idx - self._offsets[store_idx]
+        spec = self.store_specs[store_idx]
+        t_idx = spec["start"] + local_idx
 
-        input_surface = self._surface_data[file_idx][local_idx:local_idx+2]
-        input_upper_air = self._upper_air_data[file_idx][local_idx:local_idx+2]
-        target_surface = self._surface_data[file_idx][local_idx+2]
-        target_upper_air = self._upper_air_data[file_idx][local_idx+2]
+        surface_spec = spec["surface"]
+        upper_spec = spec["upper"]
+        surface_seq = np.empty((3,) + surface_spec.shape[1:], dtype=surface_spec.dtype)
+        upper_seq = np.empty((3,) + upper_spec.shape[1:], dtype=upper_spec.dtype)
+
+        for step in range(3):
+            surface_seq[step] = surface_spec.read_time_chunk(t_idx + step)[0]
+            upper_seq[step] = upper_spec.read_time_chunk(t_idx + step)[0]
+
+        input_surface = surface_seq[:2]
+        input_upper_air = upper_seq[:2]
+        target_surface = surface_seq[2]
+        target_upper_air = upper_seq[2]
 
         if DEBUG_NAN and self._nan_reports < MAX_NAN_REPORTS:
             if not np.isfinite(input_surface).all():
                 bad = ~np.isfinite(input_surface)
                 bad_vars = np.where(bad.reshape(bad.shape[0], bad.shape[1], -1).any(-1).any(0))[0].tolist()
-                print(f"[NaN] input_surface {file_name} idx {local_idx}: vars {bad_vars}")
+                print(f"[NaN] input_surface idx {t_idx}: vars {bad_vars}")
                 self._nan_reports += 1
             if not np.isfinite(target_surface).all():
                 bad = ~np.isfinite(target_surface)
                 bad_vars = np.where(bad.reshape(bad.shape[0], -1).any(-1))[0].tolist()
-                print(f"[NaN] target_surface {file_name} idx {local_idx+2}: vars {bad_vars}")
+                print(f"[NaN] target_surface idx {t_idx+2}: vars {bad_vars}")
                 self._nan_reports += 1
             if not np.isfinite(input_upper_air).all():
                 bad = ~np.isfinite(input_upper_air)
                 bad_vars = np.where(bad.reshape(bad.shape[0], bad.shape[1], -1).any(-1).any(0))[0].tolist()
-                print(f"[NaN] input_upper_air {file_name} idx {local_idx}: vars {bad_vars}")
+                print(f"[NaN] input_upper_air idx {t_idx}: vars {bad_vars}")
                 self._nan_reports += 1
             if not np.isfinite(target_upper_air).all():
                 bad = ~np.isfinite(target_upper_air)
                 bad_vars = np.where(bad.reshape(bad.shape[0], -1).any(-1))[0].tolist()
-                print(f"[NaN] target_upper_air {file_name} idx {local_idx+2}: vars {bad_vars}")
+                print(f"[NaN] target_upper_air idx {t_idx+2}: vars {bad_vars}")
                 self._nan_reports += 1
 
         if not np.isfinite(input_surface).all():
@@ -653,6 +737,38 @@ class WeatherDataset(Dataset):
         return input_surface, input_upper_air, target_surface, target_upper_air
 
 
+class ContiguousDistributedSampler(Sampler):
+    def __init__(self, dataset, num_replicas=None, rank=None, drop_last=False):
+        if num_replicas is None:
+            num_replicas = dist.get_world_size()
+        if rank is None:
+            rank = dist.get_rank()
+        self.dataset = dataset
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.drop_last = drop_last
+        self.num_samples = int(math.ceil(len(self.dataset) / self.num_replicas))
+        self.total_size = self.num_samples * self.num_replicas
+
+    def __iter__(self):
+        indices = list(range(len(self.dataset)))
+        if not self.drop_last:
+            padding_size = self.total_size - len(indices)
+            if padding_size > 0:
+                indices += indices[-padding_size:]
+        else:
+            indices = indices[:self.total_size]
+        start = self.rank * self.num_samples
+        end = start + self.num_samples
+        return iter(indices[start:end])
+
+    def __len__(self):
+        return self.num_samples
+
+    def set_epoch(self, epoch):
+        return None
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--num-epochs', type=int, default=30)
@@ -662,7 +778,15 @@ if __name__ == '__main__':
     parser.add_argument('--weight-decay', type=float, default=1e-4)
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--num-workers', type=int, default=8)
-    parser.add_argument('--checkpoint-interval', type=int, default=25)
+    parser.add_argument('--prefetch-factor', type=int, default=2)
+    parser.add_argument('--persistent-workers', action='store_true')
+    parser.add_argument('--shuffle', action='store_true')
+    parser.add_argument('--checkpoint-interval', type=int, default=5)
+    parser.add_argument('--log-file', type=str, default='log.txt')
+    parser.add_argument('--log-interval', type=int, default=50)
+    parser.add_argument('--log-append', action='store_true')
+    parser.add_argument('--no-checkpoint', action='store_true')
+    parser.add_argument('--tf32', action='store_true')
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--resume-checkpoint', type=str, default='')
     args = parser.parse_args()
@@ -684,32 +808,41 @@ if __name__ == '__main__':
     if IS_MAIN:
         print(f"Using device: {device}")
 
+    log_file = args.log_file
+    if log_file:
+        if use_ddp and not IS_MAIN:
+            base, ext = os.path.splitext(log_file)
+            if not ext:
+                ext = ".txt"
+            log_file = f"{base}_rank{rank}{ext}"
+        log_mode = "a" if args.log_append else "w"
+        with open(log_file, log_mode) as f:
+            f.write(f"start={time.strftime('%Y-%m-%d %H:%M:%S')} rank={rank} pid={os.getpid()} device={device}\n")
+
+    def _write_log(message):
+        if not log_file:
+            return
+        with open(log_file, "a") as f:
+            f.write(message + "\n")
+
     if IS_MAIN:
         print("Loading data...")
     data_dir = '/gz-data'
-    train_files = [
-        'ERA5_1940_1949_weekly.h5',
-        'ERA5_1950_1959_weekly.h5',
-        'ERA5_1960_1969_weekly.h5',
-        'ERA5_1970_1979_weekly.h5',
-        'ERA5_1980_1989_weekly.h5',
-        'ERA5_1990_1999_weekly.h5',
-        'ERA5_2000_2009_weekly.h5',
-        'ERA5_2010_2019_weekly.h5',
+    store_paths = [
+        os.path.join(data_dir, 'ERA5_1940_1981_weekly.zarr'),
+        os.path.join(data_dir, 'ERA5_1982_2023_weekly.zarr')
     ]
-    valid_files = ['ERA5_2020_2023_weekly.h5']
-    train_paths = [os.path.join(data_dir, name) for name in train_files]
-    valid_paths = [os.path.join(data_dir, name) for name in valid_files]
 
-    missing = [p for p in train_paths + valid_paths if not os.path.exists(p)]
+    missing = [p for p in store_paths if not os.path.exists(p)]
     if missing:
         raise FileNotFoundError(f"Missing data files: {missing}")
 
     if IS_MAIN:
-        for path in train_paths + valid_paths:
-            with h5.File(path, 'r') as data_file:
-                print(f"{os.path.basename(path)} surface shape: {data_file['surface'].shape}")
-                print(f"{os.path.basename(path)} upper air shape: {data_file['upper_air'].shape}")
+        for path in store_paths:
+            surface_meta = _load_zarr_json(os.path.join(path, "surface", "zarr.json"))
+            upper_meta = _load_zarr_json(os.path.join(path, "upper_air", "zarr.json"))
+            print(f"{os.path.basename(path)} surface shape: {surface_meta['shape']}")
+            print(f"{os.path.basename(path)} upper air shape: {upper_meta['shape']}")
 
     if IS_MAIN:
         print("Loading normalization parameters...")
@@ -727,36 +860,105 @@ if __name__ == '__main__':
         print(f"Surface mean shape: {surface_mean.shape}")
         print(f"Upper mean shape: {upper_mean.shape}")
 
-    train_dataset = WeatherDataset(train_paths)
-    valid_dataset = WeatherDataset(valid_paths)
+    stores = []
+    for path in store_paths:
+        surface_spec = ZarrArraySpec(path, "surface")
+        upper_spec = ZarrArraySpec(path, "upper_air")
+        if surface_spec.shape[0] != upper_spec.shape[0]:
+            raise ValueError(f"Time dimension mismatch in {path}")
+        stores.append({
+            "path": path,
+            "surface": surface_spec,
+            "upper": upper_spec,
+            "time_len": surface_spec.shape[0]
+        })
+
+    time_values = _read_time_array(store_paths[1])
+    base = np.datetime64('1940-01-01')
+    dates = base + time_values.astype('timedelta64[D]')
+    years = dates.astype('datetime64[Y]').astype(int) + 1970
+    valid_mask = years >= 2020
+    if not valid_mask.any():
+        raise RuntimeError("Validation split (year >= 2020) not found in ERA5_1982_2023_weekly.zarr")
+    valid_start = int(np.argmax(valid_mask))
+    store2_len = stores[1]["time_len"]
+    valid_end = store2_len - 3
+    train2_end = valid_start - 3
+
+    def _make_spec(store, start, end):
+        count = max(0, end - start + 1)
+        return {
+            "path": store["path"],
+            "surface": store["surface"],
+            "upper": store["upper"],
+            "start": start,
+            "end": end,
+            "count": count
+        }
+
+    train_specs = [
+        _make_spec(stores[0], 0, stores[0]["time_len"] - 3),
+        _make_spec(stores[1], 0, train2_end)
+    ]
+    valid_specs = [
+        _make_spec(stores[1], valid_start, valid_end)
+    ]
+
+    if IS_MAIN:
+        print(f"Split store2: train idx 0-{train2_end}, valid idx {valid_start}-{valid_end}, "
+              f"valid start date {str(dates[valid_start])}")
+
+    train_dataset = ZarrDataset(train_specs)
+    valid_dataset = ZarrDataset(valid_specs)
 
     batch_size = args.batch_size
     if not use_ddp and torch.cuda.device_count() > 1 and batch_size < torch.cuda.device_count() and IS_MAIN:
         print("Warning: batch_size < num_gpus; DataParallel will underutilize GPUs. Consider DDP or increase batch_size.")
 
-    train_sampler = DistributedSampler(train_dataset, shuffle=True) if use_ddp else None
-    valid_sampler = DistributedSampler(valid_dataset, shuffle=False) if use_ddp else None
+    if use_ddp:
+        if args.shuffle:
+            train_sampler = DistributedSampler(train_dataset, shuffle=True)
+        else:
+            train_sampler = ContiguousDistributedSampler(train_dataset, drop_last=False)
 
-    train_loader = DataLoader(
+        valid_sampler = ContiguousDistributedSampler(valid_dataset, drop_last=False)
+    else:
+        train_sampler = None
+        valid_sampler = None
+
+    persistent_workers = args.persistent_workers and args.num_workers > 0
+    prefetch_factor = args.prefetch_factor if args.num_workers > 0 else None
+
+    base_train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=train_sampler is None,
+        shuffle=(train_sampler is None and args.shuffle),
         sampler=train_sampler,
         num_workers=args.num_workers,
-        pin_memory=True
+        pin_memory=True,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor
     )
-    valid_loader = DataLoader(
+    base_valid_loader = DataLoader(
         valid_dataset,
         batch_size=batch_size,
         shuffle=False,
         sampler=valid_sampler,
         num_workers=args.num_workers,
-        pin_memory=True
+        pin_memory=True,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor
     )
 
     if IS_MAIN:
         print(f"Total training samples: {len(train_dataset)}")
         print(f"Total validation samples: {len(valid_dataset)}")
+
+    train_steps = len(base_train_loader)
+    valid_steps = len(base_valid_loader)
+
+    train_loader = base_train_loader
+    valid_loader = base_valid_loader
 
     # Model configuration (same as train_v2_5.py)
     embed_dim = 192
@@ -907,12 +1109,32 @@ if __name__ == '__main__':
         tweedie_loss_total = 0.0
         skipped_batches = 0
 
-        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]", disable=not IS_MAIN)
+        train_pbar = tqdm(train_loader, total=train_steps, desc=f"Epoch {epoch+1}/{num_epochs} [Train]", disable=not IS_MAIN)
         for batch_idx, (input_surface, input_upper_air, target_surface, target_upper_air) in enumerate(train_pbar):
-            input_surface = input_surface.float().to(device)
-            input_upper_air = input_upper_air.float().to(device)
-            target_surface = target_surface.float().to(device)
-            target_upper_air = target_upper_air.float().to(device)
+            if args.log_interval > 0 and batch_idx % args.log_interval == 0:
+                rss_mb = _read_rss_mb()
+                fd_count = _fd_count()
+                if torch.cuda.is_available():
+                    cuda_alloc = torch.cuda.memory_allocated(device) / (1024 * 1024)
+                    cuda_reserved = torch.cuda.memory_reserved(device) / (1024 * 1024)
+                    cuda_max_alloc = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
+                    cuda_max_reserved = torch.cuda.max_memory_reserved(device) / (1024 * 1024)
+                else:
+                    cuda_alloc = 0.0
+                    cuda_reserved = 0.0
+                    cuda_max_alloc = 0.0
+                    cuda_max_reserved = 0.0
+                _write_log(
+                    f"time={time.strftime('%Y-%m-%d %H:%M:%S')} rank={rank} "
+                    f"epoch={epoch+1} step={batch_idx}/{train_steps} "
+                    f"rss_mb={rss_mb:.1f} fd={fd_count} "
+                    f"cuda_alloc_mb={cuda_alloc:.1f} cuda_reserved_mb={cuda_reserved:.1f} "
+                    f"cuda_max_alloc_mb={cuda_max_alloc:.1f} cuda_max_reserved_mb={cuda_max_reserved:.1f}"
+                )
+            input_surface = input_surface.float().to(device, non_blocking=True)
+            input_upper_air = input_upper_air.float().to(device, non_blocking=True)
+            target_surface = target_surface.float().to(device, non_blocking=True)
+            target_upper_air = target_upper_air.float().to(device, non_blocking=True)
 
             input_surface_norm = (input_surface.permute(0, 2, 1, 3, 4) - surface_mean) / surface_std
             input_upper_air_norm = (input_upper_air.permute(0, 2, 3, 1, 4, 5) - upper_mean) / upper_std
@@ -973,28 +1195,35 @@ if __name__ == '__main__':
                 output_surface_f, target_surface_norm,
                 surface_mean, surface_std
             )
-            loss_water = calculate_water_balance_loss(
-                input_surface_norm, output_surface_f,
-                surface_mean, surface_std
-            )
-            loss_energy = calculate_energy_balance_loss(
-                input_surface_norm, output_surface_f,
-                surface_mean, surface_std
-            )
-            loss_pressure = calculate_hydrostatic_balance_loss(
-                output_upper_air_f, output_surface_f,
-                upper_mean, upper_std, surface_mean, surface_std
-            )
-            loss_temperature = calculate_temperature_tendency_loss(
-                input_upper_air_norm, output_upper_air_f,
-                input_surface_norm, output_surface_f,
-                upper_mean, upper_std, surface_mean, surface_std
-            )
-            loss_momentum = calculate_navier_stokes_loss(
-                input_upper_air_norm, output_upper_air_f,
-                input_surface_norm, output_surface_f,
-                upper_mean, upper_std, surface_mean, surface_std
-            )
+            if phys_scale > 0.0:
+                loss_water = calculate_water_balance_loss(
+                    input_surface_norm, output_surface_f,
+                    surface_mean, surface_std
+                )
+                loss_energy = calculate_energy_balance_loss(
+                    input_surface_norm, output_surface_f,
+                    surface_mean, surface_std
+                )
+                loss_pressure = calculate_hydrostatic_balance_loss(
+                    output_upper_air_f, output_surface_f,
+                    upper_mean, upper_std, surface_mean, surface_std
+                )
+                loss_temperature = calculate_temperature_tendency_loss(
+                    input_upper_air_norm, output_upper_air_f,
+                    input_surface_norm, output_surface_f,
+                    upper_mean, upper_std, surface_mean, surface_std
+                )
+                loss_momentum = calculate_navier_stokes_loss(
+                    input_upper_air_norm, output_upper_air_f,
+                    input_surface_norm, output_surface_f,
+                    upper_mean, upper_std, surface_mean, surface_std
+                )
+            else:
+                loss_water = loss_surface.new_zeros(())
+                loss_energy = loss_surface.new_zeros(())
+                loss_pressure = loss_surface.new_zeros(())
+                loss_temperature = loss_surface.new_zeros(())
+                loss_momentum = loss_surface.new_zeros(())
 
             if DEBUG_NAN and nan_reports < MAX_NAN_REPORTS:
                 losses_to_check = {
@@ -1060,7 +1289,7 @@ if __name__ == '__main__':
                 "wind": dir_name
             })
 
-        n_batches = len(train_loader)
+        n_batches = train_steps
         effective_batches = max(1, n_batches - skipped_batches)
         if use_ddp:
             train_loss = ddp_sum(train_loss)
@@ -1100,12 +1329,12 @@ if __name__ == '__main__':
         valid_skipped = 0
 
         with torch.no_grad():
-            valid_pbar = tqdm(valid_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Valid]", disable=not IS_MAIN)
+            valid_pbar = tqdm(valid_loader, total=valid_steps, desc=f"Epoch {epoch+1}/{num_epochs} [Valid]", disable=not IS_MAIN)
             for input_surface, input_upper_air, target_surface, target_upper_air in valid_pbar:
-                input_surface = input_surface.float().to(device)
-                input_upper_air = input_upper_air.float().to(device)
-                target_surface = target_surface.float().to(device)
-                target_upper_air = target_upper_air.float().to(device)
+                input_surface = input_surface.float().to(device, non_blocking=True)
+                input_upper_air = input_upper_air.float().to(device, non_blocking=True)
+                target_surface = target_surface.float().to(device, non_blocking=True)
+                target_upper_air = target_upper_air.float().to(device, non_blocking=True)
 
                 input_surface_norm = (input_surface.permute(0, 2, 1, 3, 4) - surface_mean) / surface_std
                 input_upper_air_norm = (input_upper_air.permute(0, 2, 3, 1, 4, 5) - upper_mean) / upper_std
@@ -1129,28 +1358,35 @@ if __name__ == '__main__':
                     output_surface_f, target_surface_norm,
                     surface_mean, surface_std
                 )
-                loss_water = calculate_water_balance_loss(
-                    input_surface_norm, output_surface_f,
-                    surface_mean, surface_std
-                )
-                loss_energy = calculate_energy_balance_loss(
-                    input_surface_norm, output_surface_f,
-                    surface_mean, surface_std
-                )
-                loss_pressure = calculate_hydrostatic_balance_loss(
-                    output_upper_air_f, output_surface_f,
-                    upper_mean, upper_std, surface_mean, surface_std
-                )
-                loss_temperature = calculate_temperature_tendency_loss(
-                    input_upper_air_norm, output_upper_air_f,
-                    input_surface_norm, output_surface_f,
-                    upper_mean, upper_std, surface_mean, surface_std
-                )
-                loss_momentum = calculate_navier_stokes_loss(
-                    input_upper_air_norm, output_upper_air_f,
-                    input_surface_norm, output_surface_f,
-                    upper_mean, upper_std, surface_mean, surface_std
-                )
+                if phys_scale > 0.0:
+                    loss_water = calculate_water_balance_loss(
+                        input_surface_norm, output_surface_f,
+                        surface_mean, surface_std
+                    )
+                    loss_energy = calculate_energy_balance_loss(
+                        input_surface_norm, output_surface_f,
+                        surface_mean, surface_std
+                    )
+                    loss_pressure = calculate_hydrostatic_balance_loss(
+                        output_upper_air_f, output_surface_f,
+                        upper_mean, upper_std, surface_mean, surface_std
+                    )
+                    loss_temperature = calculate_temperature_tendency_loss(
+                        input_upper_air_norm, output_upper_air_f,
+                        input_surface_norm, output_surface_f,
+                        upper_mean, upper_std, surface_mean, surface_std
+                    )
+                    loss_momentum = calculate_navier_stokes_loss(
+                        input_upper_air_norm, output_upper_air_f,
+                        input_surface_norm, output_surface_f,
+                        upper_mean, upper_std, surface_mean, surface_std
+                    )
+                else:
+                    loss_water = loss_surface.new_zeros(())
+                    loss_energy = loss_surface.new_zeros(())
+                    loss_pressure = loss_surface.new_zeros(())
+                    loss_temperature = loss_surface.new_zeros(())
+                    loss_momentum = loss_surface.new_zeros(())
 
                 total_loss = loss_surface + loss_upper_air + \
                              lambda_water_t * loss_water + \
@@ -1183,7 +1419,7 @@ if __name__ == '__main__':
                     "upper": f"{loss_upper_air.item():.4f}"
                 })
 
-        valid_batches = len(valid_loader)
+        valid_batches = valid_steps
         valid_effective = max(1, valid_batches - valid_skipped)
         if use_ddp:
             valid_loss = ddp_sum(valid_loss)
@@ -1241,5 +1477,11 @@ if __name__ == '__main__':
 
     if IS_MAIN:
         print("Training completed!")
+        final_path = os.path.join(save_dir, "model_v3_5_final.pth")
+        if hasattr(model, 'module'):
+            torch.save(model.module.state_dict(), final_path)
+        else:
+            torch.save(model.state_dict(), final_path)
+        print(f"Saved final checkpoint: {final_path}")
     if use_ddp:
         dist.destroy_process_group()

@@ -356,6 +356,8 @@ class CanglongV2_2(nn.Module):
         if self.input_constant.device != surface.device:
             self.input_constant = self.input_constant.to(surface.device)
         constant = self.conv_constant(self.input_constant)
+        if constant.shape[0] != surface.shape[0]:
+            constant = constant.expand(surface.shape[0], -1, -1, -1)
 
         surface_encoded = self.encoder3d(surface)
         upper_air_encoded = self.patchembed4d(upper_air)

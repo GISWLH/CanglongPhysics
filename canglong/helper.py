@@ -40,7 +40,7 @@ class ResidualBlock(nn.Module):
         if self.in_channels != self.out_channels:
             x1 = self.channel_up(x)
 
-            return self.channel_up(x)# + self.block(x)
+            return x1 + self.block(x)
         else:
             return x + self.block(x)
 
