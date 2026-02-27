@@ -1,4 +1,4 @@
-﻿"""
+"""
 Hindcast 2022-2023 批量回报脚本
 基于run_temp.py改编，用于批量处理2022-2023年全年数据
 使用预加载的输入数据，无需从Google Cloud下载
@@ -695,7 +695,7 @@ sys.modules['canglong.embed'] = embed_old
 import canglong.recovery_old as recovery_old
 sys.modules['canglong.recovery'] = recovery_old
 
-model_path = 'F:/model/weather_model_epoch_500.pt'
+model_path = '/home/lhwang/Desktop/model/weather_model_epoch_500.pt'
 model = torch.load(model_path, map_location=device, weights_only=False)
 model.to(device)
 model.eval()
@@ -714,14 +714,14 @@ def load_memmap_tensor(path):
     return tensor
 
 print("加载预处理数据...")
-surface_input = load_memmap_tensor('I:/ERA5_np/input_surface_norm_test_last100.pt')  # (16, 100, 721, 1440)
-upper_air_input = load_memmap_tensor('I:/ERA5_np/input_upper_air_norm_test_last100.pt')  # (7, 4, 100, 721, 1440)
+surface_input = load_memmap_tensor('/data/lhwang/input_surface_norm_test_last100.pt')  # (16, 100, 721, 1440)
+upper_air_input = load_memmap_tensor('/data/lhwang/input_upper_air_norm_test_last100.pt')  # (7, 4, 100, 721, 1440)
 print(f"Surface输入形状: {surface_input.shape}")
 print(f"Upper air输入形状: {upper_air_input.shape}")
 
 # 加载气候态数据用于SPEI计算
 print("加载气候态数据...")
-climate = xr.open_dataset('E:/data/climate_variables_2000_2023_weekly.nc', chunks={'time': 4, 'latitude': 181, 'longitude': 360})
+climate = xr.open_dataset('/data/lhwang/climate_variables_2000_2023_weekly.nc', chunks={'time': 4, 'latitude': 181, 'longitude': 360})
 
 # 定义周号计算函数
 def get_week_of_year(date):
