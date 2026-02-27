@@ -19,14 +19,42 @@ Example usage:
 """
 
 # Import the main model
-from .model_v1 import Canglong
+from .model_v1 import (
+    Canglong,
+    Encoder,
+    Decoder,
+    BasicLayer,
+    EarthSpecificBlock,
+    EarthAttention3D,
+    UpSample,
+    DownSample,
+    Mlp,
+)
 from .model_v2 import CanglongV2
 from .model_v2_1 import CanglongV2_1
 from .model_v2_2 import CanglongV2_2
 from .model_v2_3 import CanglongV2_3
 from .model_v2_4 import CanglongV2_4
 from .model_v2_5 import CanglongV2_5
-from .model_v3 import CanglongV3
+try:
+    from .model_v3 import CanglongV3
+except Exception as exc:
+    _canglong_v3_import_error = exc
+
+    def CanglongV3(*_args, **_kwargs):
+        raise ImportError(
+            "CanglongV3 import failed. Install h5py/hdf5 or fix DLL PATH."
+        ) from _canglong_v3_import_error
+
+# Import shared blocks for checkpoint compatibility
+from .helper import (
+    GroupNorm,
+    Swish,
+    ResidualBlock,
+    UpSampleBlock,
+    DownSampleBlock,
+    NonLocalBlock,
+)
 
 # Import utility functions if needed
 from .earth_position import calculate_position_bias_indices
@@ -50,6 +78,20 @@ __all__ = [
     'CanglongV2_4',
     'CanglongV2_5',
     'CanglongV3',
+    'Encoder',
+    'Decoder',
+    'BasicLayer',
+    'EarthSpecificBlock',
+    'EarthAttention3D',
+    'UpSample',
+    'DownSample',
+    'Mlp',
+    'GroupNorm',
+    'Swish',
+    'ResidualBlock',
+    'UpSampleBlock',
+    'DownSampleBlock',
+    'NonLocalBlock',
     'calculate_position_bias_indices',
     'create_shifted_window_mask',
     'partition_windows',
