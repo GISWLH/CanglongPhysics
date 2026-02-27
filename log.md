@@ -2041,3 +2041,35 @@ Epoch 50/50
          Physical Weighted - Water: 0.022766, Energy: 0.034184, Pressure: 0.130083, Temp: 0.000017, Mom: 0.000065
   Saved checkpoint: checkpoints_v3_5/model_v3_5_epoch50.pth
 Training completed!
+
+# 180 + 120 ep
+Test set summary (precipitation & key variables):
+Average precip PCC:  0.662297
+Average precip ACC:  0.662250
+Average precip RMSE (norm.): 1.448274
+Combined score (mean PCC/ACC): 0.662273
+Average avg_tnlwrf PCC: 0.937673, RMSE(norm.): 0.313964
+Average t2m PCC:       0.991869, RMSE(norm.): 0.119930
+Average d2m PCC:       0.988587, RMSE(norm.): 0.137775
+Average u200 PCC:      0.847247, RMSE(norm.): 0.517206
+Average u850 PCC:      0.819455, RMSE(norm.): 0.588045
+Average grouped PCC (precip/t2m/d2m/u200/u850): 0.861891
+Average grouped RMSE(norm.) (precip/t2m/d2m/u200/u850): 0.562246
+Average surface RMSE(norm.):  0.498761
+Average upper-air RMSE(norm.):0.677551
+
+# 120 ep
+Test set summary (precipitation & key variables):
+Average precip PCC:  0.690708
+Average precip ACC:  0.690686
+Average precip RMSE (norm.): 1.381477
+Combined score (mean PCC/ACC): 0.690697
+Average avg_tnlwrf PCC: 0.944799, RMSE(norm.): 0.295809
+Average t2m PCC:       0.992230, RMSE(norm.): 0.114604
+Average d2m PCC:       0.988938, RMSE(norm.): 0.134566
+Average u200 PCC:      0.854360, RMSE(norm.): 0.508421
+Average u850 PCC:      0.834147, RMSE(norm.): 0.567885
+Average grouped PCC (precip/t2m/d2m/u200/u850): 0.872077
+Average grouped RMSE(norm.) (precip/t2m/d2m/u200/u850): 0.541391
+Average surface RMSE(norm.):  0.505691
+Average upper-air RMSE(norm.):0.663416

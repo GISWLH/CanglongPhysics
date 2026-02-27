@@ -1,0 +1,14 @@
+start=2026-02-07 10:53:20 rank=0 pid=275245 device=cuda:0
+time=2026-02-07 12:00:53 epoch=1/300 train_total=0.705777 valid_total=0.985208 valid_focus=2.370668
+time=2026-02-07 13:07:41 epoch=2/300 train_total=0.687849 valid_total=0.997971 valid_focus=2.410631
+time=2026-02-07 14:14:28 epoch=3/300 train_total=0.679333 valid_total=1.002717 valid_focus=2.433972
+time=2026-02-07 15:21:14 epoch=4/300 train_total=0.674257 valid_total=1.005162 valid_focus=2.441145
+time=2026-02-07 16:28:02 epoch=5/300 train_total=0.670137 valid_total=1.011517 valid_focus=2.463970
+time=2026-02-07 17:34:50 epoch=6/300 train_total=0.667098 valid_total=1.012653 valid_focus=2.456434
+time=2026-02-07 18:41:37 epoch=7/300 train_total=0.664244 valid_total=1.016266 valid_focus=2.487928
+time=2026-02-07 19:48:24 epoch=8/300 train_total=0.662620 valid_total=1.022287 valid_focus=2.515327
+time=2026-02-07 20:55:11 epoch=9/300 train_total=0.660402 valid_total=1.024317 valid_focus=2.513334
+time=2026-02-07 22:01:57 epoch=10/300 train_total=0.659115 valid_total=1.022124 valid_focus=2.483462
+time=2026-02-07 23:08:41 epoch=11/300 train_total=0.657198 valid_total=1.024957 valid_focus=2.507274
+time=2026-02-08 00:15:29 epoch=12/300 train_total=0.655148 valid_total=1.033115 valid_focus=2.557473
+time=2026-02-08 01:22:15 epoch=13/300 train_total=0.653898 valid_total=1.034262 valid_focus=2.549314

@@ -1,5 +1,5 @@
 """
-CAS-Canglong V3.5 Training Script
+CAS-Canglong V3.5 Continue Training Script
 V3.5: V2.5 backbone + physical constraints from train_v3
 """
 
@@ -25,9 +25,6 @@ from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 
 from canglong import CanglongV2_5
-from canglong.wind_aware_shift import WIND_DIR_NAMES, get_dominant_direction
-
-
 # ============ Debug switches ============
 DEBUG_NAN = False
 STOP_ON_NAN = False
@@ -73,17 +70,6 @@ def _fd_count():
         return len(os.listdir(f"/proc/{os.getpid()}/fd"))
     except Exception:
         return -1
-
-
-def _format_wind_topk(wind_direction_id, topk=3):
-    counts = torch.bincount(wind_direction_id.flatten().long(), minlength=9).float()
-    total = counts.sum().clamp(min=1.0)
-    top_vals, top_idx = torch.topk(counts, k=topk)
-    parts = []
-    for idx, val in zip(top_idx.tolist(), top_vals.tolist()):
-        name = WIND_DIR_NAMES.get(idx, str(idx))
-        parts.append(f"{name}:{(val / total * 100.0):.1f}%")
-    return " ".join(parts)
 
 
 # ============ 常量掩码缓存 ============
@@ -782,7 +768,7 @@ class ContiguousDistributedSampler(Sampler):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--num-epochs', type=int, default=500)
+    parser.add_argument('--num-epochs', type=int, default=300)
     parser.add_argument('--lr', type=float, default=2e-4)
     parser.add_argument('--min-lr', type=float, default=1e-5)
     parser.add_argument('--warmup-epochs', type=int, default=2)
@@ -793,13 +779,22 @@ if __name__ == '__main__':
     parser.add_argument('--persistent-workers', action='store_true')
     parser.add_argument('--shuffle', action='store_true')
     parser.add_argument('--checkpoint-interval', type=int, default=5)
-    parser.add_argument('--log-file', type=str, default='log.txt')
-    parser.add_argument('--log-interval', type=int, default=50)
+    parser.add_argument('--log-file', type=str, default='log_c.txt')
     parser.add_argument('--log-append', action='store_true')
     parser.add_argument('--no-checkpoint', action='store_true')
     parser.add_argument('--tf32', action='store_true')
-    parser.add_argument('--resume', action='store_true')
     parser.add_argument('--resume-checkpoint', type=str, default='')
+    parser.add_argument('--save-dir', type=str, default='checkpoints_v3_5')
+    parser.add_argument('--save-prefix', type=str, default='model_v3_5_continue')
+    parser.add_argument('--early-stopping-patience', type=int, default=5)
+    parser.add_argument('--early-stopping-min-delta', type=float, default=1e-4)
+    parser.add_argument('--lambda-focus', type=float, default=0.1)
+    parser.add_argument('--lambda-focus-end', type=float, default=0.1)
+    parser.add_argument('--lambda-tweedie', type=float, default=6.0)
+    parser.add_argument('--lambda-tweedie-end', type=float, default=6.0)
+    parser.add_argument('--aux-decay-power', type=float, default=1.0)
+    parser.add_argument('--monitor-metric', type=str, default='valid_total',
+                        choices=['valid_total', 'valid_mse', 'valid_surface', 'valid_upper'])
     args = parser.parse_args()
 
     use_ddp = int(os.environ.get("WORLD_SIZE", "1")) > 1
@@ -964,6 +959,8 @@ if __name__ == '__main__':
     if IS_MAIN:
         print(f"Total training samples: {len(train_dataset)}")
         print(f"Total validation samples: {len(valid_dataset)}")
+        if not args.shuffle:
+            print("Warning: --shuffle is off. Sequential sampling may hurt generalization.")
 
     train_steps = len(base_train_loader)
     valid_steps = len(base_valid_loader)
@@ -1016,54 +1013,61 @@ if __name__ == '__main__':
     if IS_MAIN:
         print(f"Mixed precision training: {use_amp}")
 
-    save_dir = 'checkpoints_v3_5'
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    save_dir = args.save_dir if os.path.isabs(args.save_dir) else os.path.join(script_dir, args.save_dir)
     os.makedirs(save_dir, exist_ok=True)
-    best_path = os.path.join(save_dir, "model_v3_5_best.pth")
-    best_meta_path = os.path.join(save_dir, "model_v3_5_best.json")
-
-    resume = args.resume
-    start_epoch = 0
+    default_resume_path = os.path.join(save_dir, "model_v3_5_best.pth")
+    continue_best_path = os.path.join(save_dir, f"{args.save_prefix}_best.pth")
+    continue_best_meta_path = os.path.join(save_dir, f"{args.save_prefix}_best.json")
+    early_stop_patience = max(0, args.early_stopping_patience)
+    early_stop_min_delta = max(0.0, args.early_stopping_min_delta)
+    monitor_metric = args.monitor_metric
     best_valid_loss = float("inf")
     best_epoch = 0
-    latest_checkpoint = None
-    if resume:
-        if args.resume_checkpoint:
-            latest_checkpoint = Path(args.resume_checkpoint)
-        elif os.path.exists(best_path):
-            latest_checkpoint = Path(best_path)
+    epochs_without_improve = 0
 
-    if resume and latest_checkpoint is not None:
-        try:
-            state_dict = torch.load(latest_checkpoint, map_location=device, weights_only=True)
-            if hasattr(model, 'module'):
-                model.module.load_state_dict(state_dict)
-            else:
-                model.load_state_dict(state_dict)
-            if os.path.exists(best_meta_path):
-                try:
-                    with open(best_meta_path, "r") as f:
-                        meta = json.load(f)
-                    start_epoch = int(meta.get("epoch", 0))
-                    best_valid_loss = float(meta.get("valid_loss", best_valid_loss))
-                    best_epoch = start_epoch
-                except (ValueError, KeyError, TypeError):
-                    start_epoch = 0
-            if IS_MAIN:
-                print(f"Resumed model weights from {latest_checkpoint} (epoch {start_epoch}).")
-        except (FileNotFoundError, ValueError, KeyError) as err:
-            if IS_MAIN:
-                print(f"Failed to load checkpoint {latest_checkpoint}: {err}. Starting fresh training.")
-            start_epoch = 0
-    else:
+    start_epoch = 0
+    resume_checkpoint = args.resume_checkpoint or default_resume_path
+    resume_checkpoint = Path(resume_checkpoint)
+    if not resume_checkpoint.exists():
+        raise FileNotFoundError(f"Resume checkpoint not found: {resume_checkpoint}")
+
+    try:
+        state_dict = torch.load(resume_checkpoint, map_location=device, weights_only=True)
+        if hasattr(model, 'module'):
+            model.module.load_state_dict(state_dict)
+        else:
+            model.load_state_dict(state_dict)
         if IS_MAIN:
-            print("No checkpoint found. Starting fresh training.")
+            print(f"Resumed model weights from {resume_checkpoint}.")
+    except (FileNotFoundError, ValueError, KeyError) as err:
+        raise RuntimeError(f"Failed to load checkpoint {resume_checkpoint}: {err}") from err
+
+    if continue_best_meta_path and os.path.exists(continue_best_meta_path):
+        try:
+            with open(continue_best_meta_path, "r") as f:
+                old_best = json.load(f)
+            old_metric = old_best.get("monitor_metric", "valid_total")
+            if old_metric == monitor_metric:
+                best_valid_loss = float(old_best.get("monitor_value", old_best.get("valid_loss", best_valid_loss)))
+                best_epoch = int(old_best.get("epoch", 0))
+                if IS_MAIN:
+                    print(f"Loaded previous best {monitor_metric}={best_valid_loss:.6f} at epoch {best_epoch} from {continue_best_meta_path}.")
+            elif IS_MAIN:
+                print(f"Previous best metric ({old_metric}) != current monitor metric ({monitor_metric}); start best tracking from current run.")
+        except (ValueError, KeyError, TypeError):
+            if IS_MAIN:
+                print(f"Warning: failed to parse {continue_best_meta_path}, start best tracking from current run.")
 
     num_epochs = args.num_epochs
+
+    decay_power = 2.0
 
     def lr_lambda(epoch_idx):
         if epoch_idx < warmup_epochs:
             return float(epoch_idx + 1) / float(warmup_epochs)
         progress = (epoch_idx - warmup_epochs) / float(max(1, num_epochs - warmup_epochs))
+        progress = min(1.0, progress) ** decay_power
         cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
         min_lr_ratio = min_lr / base_lr
         return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
@@ -1072,14 +1076,24 @@ if __name__ == '__main__':
         param_group.setdefault('initial_lr', base_lr)
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda, last_epoch=start_epoch - 1)
 
-    # ============ 固定权重（与train_v3一致） ============
-    lambda_water = 8
-    lambda_energy = 2e-5
-    lambda_pressure = 1e-8
-    lambda_temperature = 6e-4
-    lambda_momentum = 2e-1
-    lambda_focus = 0.1
-    lambda_tweedie = 12.0
+    # ============ 固定权重（continue版本关闭物理损失） ============
+    lambda_water = 0.0
+    lambda_energy = 0.0
+    lambda_pressure = 0.0
+    lambda_temperature = 0.0
+    lambda_momentum = 0.0
+    lambda_focus = args.lambda_focus
+    lambda_focus_end = args.lambda_focus_end
+    lambda_tweedie = args.lambda_tweedie
+    lambda_tweedie_end = args.lambda_tweedie_end
+    aux_decay_power = max(0.1, args.aux_decay_power)
+    use_physical = False
+
+    def scheduled_aux_weight(start_value, end_value, epoch_idx):
+        progress = epoch_idx / float(max(1, num_epochs - 1))
+        progress = min(1.0, max(0.0, progress))
+        progress = progress ** aux_decay_power
+        return start_value + (end_value - start_value) * progress
 
     if IS_MAIN:
         print("=" * 70)
@@ -1087,11 +1101,15 @@ if __name__ == '__main__':
         print("=" * 70)
         print(f"lambda_water={lambda_water}, lambda_energy={lambda_energy}, lambda_pressure={lambda_pressure}")
         print(f"lambda_temperature={lambda_temperature}, lambda_momentum={lambda_momentum}")
-        print(f"lambda_focus={lambda_focus}, lambda_tweedie={lambda_tweedie}")
+        print(f"lambda_focus={lambda_focus} -> {lambda_focus_end}, lambda_tweedie={lambda_tweedie} -> {lambda_tweedie_end}")
+        print(f"aux_decay_power={aux_decay_power}, monitor_metric={monitor_metric}")
         print(f"lr={base_lr}, min_lr={min_lr}, warmup_epochs={warmup_epochs}, num_epochs={num_epochs}")
+        print(f"save_dir={save_dir}, save_prefix={args.save_prefix}")
+        print(f"resume_checkpoint={resume_checkpoint}")
+        print(f"early_stopping_patience={early_stop_patience}, early_stopping_min_delta={early_stop_min_delta}")
+        print(f"checkpoint_interval={args.checkpoint_interval}")
         print("=" * 70)
 
-    wind_direction_counts = {}
     nan_reports = 0
     half_epochs = max(1, num_epochs // 2)
 
@@ -1106,12 +1124,14 @@ if __name__ == '__main__':
         if use_ddp and train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
-        phys_scale = max(0.0, 1.0 - (epoch / float(half_epochs)))
+        phys_scale = 0.0 if not use_physical else max(0.0, 1.0 - (epoch / float(half_epochs)))
         lambda_water_t = lambda_water * phys_scale
         lambda_energy_t = lambda_energy * phys_scale
         lambda_pressure_t = lambda_pressure * phys_scale
         lambda_temperature_t = lambda_temperature * phys_scale
         lambda_momentum_t = lambda_momentum * phys_scale
+        lambda_focus_t = scheduled_aux_weight(lambda_focus, lambda_focus_end, epoch)
+        lambda_tweedie_t = scheduled_aux_weight(lambda_tweedie, lambda_tweedie_end, epoch)
 
         model.train()
         train_loss = 0.0
@@ -1128,26 +1148,6 @@ if __name__ == '__main__':
 
         train_pbar = tqdm(train_loader, total=train_steps, desc=f"Epoch {epoch+1}/{num_epochs} [Train]", disable=not IS_MAIN)
         for batch_idx, (input_surface, input_upper_air, target_surface, target_upper_air) in enumerate(train_pbar):
-            if args.log_interval > 0 and batch_idx % args.log_interval == 0:
-                rss_mb = _read_rss_mb()
-                fd_count = _fd_count()
-                if torch.cuda.is_available():
-                    cuda_alloc = torch.cuda.memory_allocated(device) / (1024 * 1024)
-                    cuda_reserved = torch.cuda.memory_reserved(device) / (1024 * 1024)
-                    cuda_max_alloc = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
-                    cuda_max_reserved = torch.cuda.max_memory_reserved(device) / (1024 * 1024)
-                else:
-                    cuda_alloc = 0.0
-                    cuda_reserved = 0.0
-                    cuda_max_alloc = 0.0
-                    cuda_max_reserved = 0.0
-                _write_log(
-                    f"time={time.strftime('%Y-%m-%d %H:%M:%S')} rank={rank} "
-                    f"epoch={epoch+1} step={batch_idx}/{train_steps} "
-                    f"rss_mb={rss_mb:.1f} fd={fd_count} "
-                    f"cuda_alloc_mb={cuda_alloc:.1f} cuda_reserved_mb={cuda_reserved:.1f} "
-                    f"cuda_max_alloc_mb={cuda_max_alloc:.1f} cuda_max_reserved_mb={cuda_max_reserved:.1f}"
-                )
             input_surface = input_surface.float().to(device, non_blocking=True)
             input_upper_air = input_upper_air.float().to(device, non_blocking=True)
             target_surface = target_surface.float().to(device, non_blocking=True)
@@ -1199,10 +1199,6 @@ if __name__ == '__main__':
 
             output_surface_f = torch.nan_to_num(output_surface.float(), nan=0.0, posinf=0.0, neginf=0.0)
             output_upper_air_f = torch.nan_to_num(output_upper_air.float(), nan=0.0, posinf=0.0, neginf=0.0)
-            top3 = "NA"
-            if IS_MAIN:
-                top3 = _format_wind_topk(wind_dir_id, topk=3)
-
             loss_surface = criterion(output_surface_f, target_surface_norm)
             loss_upper_air = criterion(output_upper_air_f, target_upper_air_norm)
 
@@ -1215,7 +1211,7 @@ if __name__ == '__main__':
                 output_surface_f, target_surface_norm,
                 surface_mean, surface_std
             )
-            if phys_scale > 0.0:
+            if use_physical:
                 loss_water = calculate_water_balance_loss(
                     input_surface_norm, output_surface_f,
                     surface_mean, surface_std
@@ -1271,27 +1267,11 @@ if __name__ == '__main__':
                    lambda_pressure_t * loss_pressure + \
                    lambda_temperature_t * loss_temperature + \
                    lambda_momentum_t * loss_momentum + \
-                   lambda_focus * loss_focus + \
-                   lambda_tweedie * loss_tweedie
-            if IS_MAIN:
-                _write_log(
-                    f"time={time.strftime('%Y-%m-%d %H:%M:%S')} rank={rank} "
-                    f"epoch={epoch+1} step={batch_idx}/{train_steps} "
-                    f"loss_total={loss.item():.6f} "
-                    f"loss_surface={loss_surface.item():.6f} loss_upper={loss_upper_air.item():.6f} "
-                    f"loss_focus_w={lambda_focus * loss_focus.item():.6f} "
-                    f"loss_tweedie_w={lambda_tweedie * loss_tweedie.item():.6f} "
-                    f"loss_water_w={lambda_water_t * loss_water.item():.6f} "
-                    f"loss_energy_w={lambda_energy_t * loss_energy.item():.6f} "
-                    f"loss_pressure_w={lambda_pressure_t * loss_pressure.item():.6f} "
-                    f"loss_temp_w={lambda_temperature_t * loss_temperature.item():.6f} "
-                    f"loss_mom_w={lambda_momentum_t * loss_momentum.item():.6f} "
-                    f"wind_top3=\"{top3}\""
-                )
+                   lambda_focus_t * loss_focus + \
+                   lambda_tweedie_t * loss_tweedie
 
             if not torch.isfinite(loss):
                 print(f"Non-finite loss at epoch {epoch+1}, batch {batch_idx}. Skipping update.")
-                train_pbar.set_postfix({"loss": "nan", "surf": "nan", "upper": f"{loss_upper_air.item():.4f}"})
                 skipped_batches += 1
                 continue
 
@@ -1313,25 +1293,6 @@ if __name__ == '__main__':
             focus_loss_total += loss_focus.item()
             tweedie_loss_total += loss_tweedie.item()
 
-            dominant_id = get_dominant_direction(wind_dir_id)
-            dir_name = WIND_DIR_NAMES.get(dominant_id, 'Unknown')
-            wind_direction_counts[dir_name] = wind_direction_counts.get(dir_name, 0) + 1
-            weighted_phys = (
-                lambda_water_t * loss_water +
-                lambda_energy_t * loss_energy +
-                lambda_pressure_t * loss_pressure +
-                lambda_temperature_t * loss_temperature +
-                lambda_momentum_t * loss_momentum
-            ).item()
-            train_pbar.set_postfix({
-                "loss": f"{batch_loss:.4f}",
-                "surf": f"{loss_surface.item():.4f}",
-                "upper": f"{loss_upper_air.item():.4f}",
-                "w_phys": f"{weighted_phys:.4f}",
-                "w_focus": f"{(lambda_focus * loss_focus).item():.4f}",
-                "w_twd": f"{(lambda_tweedie * loss_tweedie).item():.4f}",
-                "wind_top3": top3
-            })
 
         n_batches = train_steps
         effective_batches = max(1, n_batches - skipped_batches)
@@ -1402,7 +1363,7 @@ if __name__ == '__main__':
                     output_surface_f, target_surface_norm,
                     surface_mean, surface_std
                 )
-                if phys_scale > 0.0:
+                if use_physical:
                     loss_water = calculate_water_balance_loss(
                         input_surface_norm, output_surface_f,
                         surface_mean, surface_std
@@ -1438,12 +1399,11 @@ if __name__ == '__main__':
                              lambda_pressure_t * loss_pressure + \
                              lambda_temperature_t * loss_temperature + \
                              lambda_momentum_t * loss_momentum + \
-                             lambda_focus * loss_focus + \
-                             lambda_tweedie * loss_tweedie
+                             lambda_focus_t * loss_focus + \
+                             lambda_tweedie_t * loss_tweedie
 
                 if not torch.isfinite(total_loss):
                     valid_skipped += 1
-                    valid_pbar.set_postfix({"loss": "nan", "surf": "nan", "upper": f"{loss_upper_air.item():.4f}"})
                     continue
 
                 valid_loss += total_loss.item()
@@ -1457,11 +1417,6 @@ if __name__ == '__main__':
                 valid_focus_loss += loss_focus.item()
                 valid_tweedie_loss += loss_tweedie.item()
 
-                valid_pbar.set_postfix({
-                    "loss": f"{total_loss.item():.4f}",
-                    "surf": f"{loss_surface.item():.4f}",
-                    "upper": f"{loss_upper_air.item():.4f}"
-                })
 
         valid_batches = valid_steps
         valid_effective = max(1, valid_batches - valid_skipped)
@@ -1489,52 +1444,90 @@ if __name__ == '__main__':
         valid_focus_loss /= valid_effective
         valid_tweedie_loss /= valid_effective
 
+        valid_mse_total = valid_surface_loss + valid_upper_air_loss
+        if monitor_metric == 'valid_total':
+            monitor_value = valid_loss
+        elif monitor_metric == 'valid_mse':
+            monitor_value = valid_mse_total
+        elif monitor_metric == 'valid_surface':
+            monitor_value = valid_surface_loss
+        else:
+            monitor_value = valid_upper_air_loss
+
         if IS_MAIN:
             current_lr = optimizer.param_groups[0]['lr']
             print(f"\nEpoch {epoch+1}/{num_epochs} (lr={current_lr:.6e}, phys_scale={phys_scale:.3f})")
             print(f"  Train - Total: {train_loss:.6f}")
             print(f"         MSE - Surface: {surface_loss_total:.6f}, Upper Air: {upper_air_loss_total:.6f}")
-            print(f"         Focus - Raw: {focus_loss_total:.6f}, Weighted: {lambda_focus*focus_loss_total:.6f}")
-            print(f"         Tweedie - Raw: {tweedie_loss_total:.2e}, Weighted: {lambda_tweedie*tweedie_loss_total:.6f}")
+            print(f"         Focus - Raw: {focus_loss_total:.6f}, Weighted: {lambda_focus_t*focus_loss_total:.6f} (lambda={lambda_focus_t:.6f})")
+            print(f"         Tweedie - Raw: {tweedie_loss_total:.2e}, Weighted: {lambda_tweedie_t*tweedie_loss_total:.6f} (lambda={lambda_tweedie_t:.6f})")
             print(f"         Physical Raw - Water: {water_loss_total:.2e}, Energy: {energy_loss_total:.2e}, Pressure: {pressure_loss_total:.2e}, Temp: {temperature_loss_total:.2e}, Mom: {momentum_loss_total:.2e}")
             print(f"         Physical Weighted - Water: {lambda_water_t*water_loss_total:.6f}, Energy: {lambda_energy_t*energy_loss_total:.6f}, Pressure: {lambda_pressure_t*pressure_loss_total:.6f}, Temp: {lambda_temperature_t*temperature_loss_total:.6f}, Mom: {lambda_momentum_t*momentum_loss_total:.6f}")
             if skipped_batches > 0:
                 print(f"         Skipped batches: {skipped_batches}")
             print(f"  Valid - Total: {valid_loss:.6f}")
             print(f"         MSE - Surface: {valid_surface_loss:.6f}, Upper Air: {valid_upper_air_loss:.6f}")
-            print(f"         Focus - Raw: {valid_focus_loss:.6f}, Weighted: {lambda_focus*valid_focus_loss:.6f}")
-            print(f"         Tweedie - Raw: {valid_tweedie_loss:.2e}, Weighted: {lambda_tweedie*valid_tweedie_loss:.6f}")
+            print(f"         Focus - Raw: {valid_focus_loss:.6f}, Weighted: {lambda_focus_t*valid_focus_loss:.6f} (lambda={lambda_focus_t:.6f})")
+            print(f"         Tweedie - Raw: {valid_tweedie_loss:.2e}, Weighted: {lambda_tweedie_t*valid_tweedie_loss:.6f} (lambda={lambda_tweedie_t:.6f})")
             print(f"         Physical Raw - Water: {valid_water_loss:.2e}, Energy: {valid_energy_loss:.2e}, Pressure: {valid_pressure_loss:.2e}, Temp: {valid_temperature_loss:.2e}, Mom: {valid_momentum_loss:.2e}")
             print(f"         Physical Weighted - Water: {lambda_water_t*valid_water_loss:.6f}, Energy: {lambda_energy_t*valid_energy_loss:.6f}, Pressure: {lambda_pressure_t*valid_pressure_loss:.6f}, Temp: {lambda_temperature_t*valid_temperature_loss:.6f}, Mom: {lambda_momentum_t*valid_momentum_loss:.6f}")
+            print(f"         Monitor - {monitor_metric}: {monitor_value:.6f}")
             if valid_skipped > 0:
                 print(f"         Valid skipped batches: {valid_skipped}")
             _write_log(
                 f"time={time.strftime('%Y-%m-%d %H:%M:%S')} epoch={epoch+1}/{num_epochs} "
                 f"lr={current_lr:.6e} phys_scale={phys_scale:.3f} "
                 f"train_total={train_loss:.6f} train_surface={surface_loss_total:.6f} train_upper={upper_air_loss_total:.6f} "
-                f"train_focus_w={lambda_focus*focus_loss_total:.6f} train_tweedie_w={lambda_tweedie*tweedie_loss_total:.6f} "
+                f"train_focus_w={lambda_focus_t*focus_loss_total:.6f} train_tweedie_w={lambda_tweedie_t*tweedie_loss_total:.6f} "
                 f"train_water_w={lambda_water_t*water_loss_total:.6f} train_energy_w={lambda_energy_t*energy_loss_total:.6f} "
                 f"train_pressure_w={lambda_pressure_t*pressure_loss_total:.6f} train_temp_w={lambda_temperature_t*temperature_loss_total:.6f} "
                 f"train_mom_w={lambda_momentum_t*momentum_loss_total:.6f} "
                 f"valid_total={valid_loss:.6f} valid_surface={valid_surface_loss:.6f} valid_upper={valid_upper_air_loss:.6f} "
-                f"valid_focus_w={lambda_focus*valid_focus_loss:.6f} valid_tweedie_w={lambda_tweedie*valid_tweedie_loss:.6f} "
+                f"valid_focus_w={lambda_focus_t*valid_focus_loss:.6f} valid_tweedie_w={lambda_tweedie_t*valid_tweedie_loss:.6f} "
                 f"valid_water_w={lambda_water_t*valid_water_loss:.6f} valid_energy_w={lambda_energy_t*valid_energy_loss:.6f} "
                 f"valid_pressure_w={lambda_pressure_t*valid_pressure_loss:.6f} valid_temp_w={lambda_temperature_t*valid_temperature_loss:.6f} "
                 f"valid_mom_w={lambda_momentum_t*valid_momentum_loss:.6f} "
+                f"monitor_metric={monitor_metric} monitor_value={monitor_value:.6f} "
+                f"aux_focus_lambda={lambda_focus_t:.6f} aux_tweedie_lambda={lambda_tweedie_t:.6f} "
                 f"skipped={skipped_batches} valid_skipped={valid_skipped}"
             )
 
-        if IS_MAIN and not args.no_checkpoint:
-            if valid_loss < best_valid_loss:
-                best_valid_loss = valid_loss
-                best_epoch = epoch + 1
+        improved = monitor_value < (best_valid_loss - early_stop_min_delta)
+        if improved:
+            best_valid_loss = monitor_value
+            best_epoch = epoch + 1
+            epochs_without_improve = 0
+            if IS_MAIN and not args.no_checkpoint:
                 if hasattr(model, 'module'):
-                    torch.save(model.module.state_dict(), best_path)
+                    torch.save(model.module.state_dict(), continue_best_path)
                 else:
-                    torch.save(model.state_dict(), best_path)
-                with open(best_meta_path, "w") as f:
-                    json.dump({"epoch": best_epoch, "valid_loss": best_valid_loss}, f)
-                print(f"  Saved best checkpoint: {best_path} (epoch {best_epoch}, valid {best_valid_loss:.6f})")
+                    torch.save(model.state_dict(), continue_best_path)
+                with open(continue_best_meta_path, "w") as f:
+                    json.dump({
+                        "epoch": best_epoch,
+                        "valid_loss": valid_loss,
+                        "monitor_metric": monitor_metric,
+                        "monitor_value": best_valid_loss,
+                        "resume_checkpoint": str(resume_checkpoint),
+                        "time": time.strftime('%Y-%m-%d %H:%M:%S')
+                    }, f)
+                print(f"  Saved continue best: {continue_best_path} (epoch {best_epoch}, {monitor_metric}={best_valid_loss:.6f})")
+        else:
+            epochs_without_improve += 1
+
+        if IS_MAIN and not args.no_checkpoint and args.checkpoint_interval > 0 and (epoch + 1) % args.checkpoint_interval == 0:
+            interval_path = os.path.join(save_dir, f"{args.save_prefix}_epoch{epoch+1}.pth")
+            if hasattr(model, 'module'):
+                torch.save(model.module.state_dict(), interval_path)
+            else:
+                torch.save(model.state_dict(), interval_path)
+            print(f"  Saved interval checkpoint: {interval_path}")
+
+        if early_stop_patience > 0 and epochs_without_improve >= early_stop_patience:
+            if IS_MAIN:
+                print(f"Early stopping triggered at epoch {epoch+1}. "
+                      f"Best epoch={best_epoch}, best_{monitor_metric}={best_valid_loss:.6f}")
+            break
 
         scheduler.step()
 

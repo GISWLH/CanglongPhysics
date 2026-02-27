@@ -25,3 +25,6 @@ __pycache__/
 
 # Ignore local settings
 .claude/settings.local.json
+
+# Ignore large training logs
+log.txt
