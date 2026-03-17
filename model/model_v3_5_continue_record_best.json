@@ -1,0 +1,1 @@
+{"epoch": 60, "valid_loss": 0.837486560528095, "monitor_metric": "valid_total", "monitor_value": 0.837486560528095, "resume_checkpoint": "checkpoints_v3_5/model_v3_5_continue_record_best.pth", "time": "2026-02-16 10:07:12"}

@@ -30,6 +30,7 @@ from .model_v1 import (
     DownSample,
     Mlp,
 )
+from .model_sst16 import CanglongSST16
 from .model_v2 import CanglongV2
 from .model_v2_1 import CanglongV2_1
 from .model_v2_2 import CanglongV2_2
@@ -71,6 +72,7 @@ __author__ = 'CAS-Canglong Team'
 # Define what gets imported with "from canglong import *"
 __all__ = [
     'Canglong',
+    'CanglongSST16',
     'CanglongV2',
     'CanglongV2_1',
     'CanglongV2_2',

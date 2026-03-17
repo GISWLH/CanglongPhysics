@@ -1,0 +1,53 @@
+2025-10-15 00:00:25,293 [INFO] 使用设备: cuda:0
+2025-10-15 00:00:25,294 [INFO] 日志文件: /home/lhwang/Desktop/CanglongPhysics/code/logs/hindcast_22_23_20251015_000025.log
+2025-10-15 00:00:29,152 [INFO] 加载模型...
+2025-10-15 00:00:30,024 [INFO] 模型加载成功
+2025-10-15 00:00:30,025 [INFO] 加载预处理数据...
+2025-10-15 00:00:45,799 [INFO] Surface输入形状: (16, 100, 721, 1440)
+2025-10-15 00:00:45,800 [INFO] Upper air输入形状: (7, 4, 100, 721, 1440)
+2025-10-15 00:00:45,800 [INFO] 加载气候态数据...
+2025-10-15 00:00:46,725 [INFO] 
+========== 开始批量回报 2022-2023 年 ==========
+2025-10-15 00:00:46,725 [INFO] 起始周: 索引4，日期2022-02-26至2022-03-04
+2025-10-15 00:00:46,725 [INFO] 总周数: 96 周
+2025-10-15 00:00:46,726 [INFO] 输出目录: /data/lhwang/tmp/hindcast_2022_2023
+2025-10-15 00:00:46,726 [INFO] 
+初始系统状态:
+2025-10-15 00:00:46,727 [INFO]   [系统] 内存: 39.7GB/134.2GB (30.5%)
+2025-10-15 00:00:46,727 [INFO]   [系统] Swap: 47.3GB/322.1GB (14.7%)
+2025-10-15 00:00:46,728 [INFO]   [GPU] 显存: 已分配 0.7GB, 已保留 0.8GB
+2025-10-15 00:00:46,731 [INFO] 
+[Week 4/100] 处理 2022-02-26 (Year 2022, Week 9)
+2025-10-15 00:00:47,227 [INFO]   提取输入数据: surface (16, 2, 721, 1440), upper air (7, 4, 2, 721, 1440)
+2025-10-15 00:00:47,352 [INFO]   开始6周滚动预报...
+2025-10-15 00:00:53,003 [INFO]   6周预报完成
+2025-10-15 00:00:53,103 [INFO]   反标准化和后处理...
+2025-10-15 00:00:56,913 [INFO]   计算PET和SPEI...
+2025-10-15 00:33:44,059 [ERROR] 
+[Week 4] 处理失败: conflicting sizes for dimension 'time': length 8 on <this-array> and length 6 on {'lat': 'lat', 'lon': 'lon', 'time': 'time'}
+2025-10-15 00:33:44,060 [ERROR]   异常详情:
+Traceback (most recent call last):
+  File "/home/lhwang/Desktop/CanglongPhysics/code/hindcast_22_23_claude.py", line 1186, in <module>
+    output_ds.attrs['forecast_start'] = forecast_start_date.strftime('%Y-%m-%d')
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/lhwang/Desktop/CanglongPhysics/code/hindcast_22_23_claude.py", line 1072, in calculate_pet_and_spei
+    total_weeks = 100  # 数据中有100周
+                        ^^^^^^^^^^^^^^^
+  File "/home/lhwang/anaconda3/envs/torch/lib/python3.11/site-packages/xarray/core/common.py", line 664, in assign_coords
+    data.coords.update(results)
+  File "/home/lhwang/anaconda3/envs/torch/lib/python3.11/site-packages/xarray/core/coordinates.py", line 603, in update
+    self._update_coords(coords, indexes)
+  File "/home/lhwang/anaconda3/envs/torch/lib/python3.11/site-packages/xarray/core/coordinates.py", line 971, in _update_coords
+    dims = calculate_dimensions(coords_plus_data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/lhwang/anaconda3/envs/torch/lib/python3.11/site-packages/xarray/core/variable.py", line 3025, in calculate_dimensions
+    raise ValueError(
+ValueError: conflicting sizes for dimension 'time': length 8 on <this-array> and length 6 on {'lat': 'lat', 'lon': 'lon', 'time': 'time'}
+2025-10-15 00:33:44,116 [INFO]   跳过当前周，继续下一周...
+2025-10-15 00:33:44,539 [INFO] 
+[Week 5/100] 处理 2022-03-05 (Year 2022, Week 10)
+2025-10-15 00:33:44,941 [INFO]   提取输入数据: surface (16, 2, 721, 1440), upper air (7, 4, 2, 721, 1440)
+2025-10-15 00:33:45,076 [INFO]   开始6周滚动预报...
+2025-10-15 00:33:49,896 [INFO]   6周预报完成
+2025-10-15 00:33:49,997 [INFO]   反标准化和后处理...
+2025-10-15 00:33:53,606 [INFO]   计算PET和SPEI...

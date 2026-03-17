@@ -1,0 +1,1 @@
+{"epoch": 22, "valid_loss": 0.6154517393845779, "monitor_metric": "valid_mse", "monitor_value": 0.6154517210446872, "resume_checkpoint": "/gz-data/model/model_v3_5_continue_record_best.pth", "time": "2026-02-17 17:17:26"}

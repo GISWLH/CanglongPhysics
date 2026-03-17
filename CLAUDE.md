@@ -1,100 +1,257 @@
 # CLAUDE.md
 
-运行代码所需的环境在conda activate torch，因此运行py代码前先激活环境
-timeout xx其中xx应该大于10分钟，因为代码运行较慢，可以多给一些时间
-我不喜欢定义太过复杂的函数，并运行main函数，我是深度jupyter notebook用户，我喜欢直接的代码，简单的函数定义是可以接受的
-使用matplotlib可视化，绘图使用Arial字体(在linux中手动增加我们的arial字体），绘图中的图片标记都用英文
+此文件为 Claude Code 在此代码库中工作时提供指导。
 
-此文件为 Claude Code (claude.ai/code) 在此代码库中工作时提供指导。
+## 编码偏好与环境
+
+- 运行代码所需的环境：`conda activate torch`，运行py代码前先激活环境
+- 模型研发阶段在base环境中运行，无需activate torch
+- timeout应大于10分钟，代码运行较慢，可以多给一些时间
+- 不喜欢定义太过复杂的函数并运行main函数；偏好jupyter notebook风格的直接代码，简单函数定义可以接受
+- 使用matplotlib可视化，绘图使用Arial字体（`/usr/share/fonts/arial/ARIAL.TTF`），图片标记都用英文
+- 绘图采用Nature风格参数（见附录）
 
 ## 项目概述
 
-CanglongPhysics 是一个专注于将物理信息添加到AI天气预测模型中的研究项目。主要目标是构建物理信息神经网络(PINNs)用于天气预报，将物理约束和模式融入深度学习模型中。
+CAS-Canglong 是一个基于物理信息的AI次季节-季节（S2S）天气预测系统。项目将Swin-Transformer架构与物理约束相结合，构建了四个递进版本的天气预报模型，面向6周滚动预报任务。
 
-## 核心组件与架构
+## 模型版本体系
 
-### 核心模型
-- **Canglong模型**: 位于 `weatherlearn/models/` 的主要基于transformer的天气预测模型
-- **Pangu Weather**: 3D transformer天气模型的参考实现 (`weatherlearn/models/pangu/`)
-- **FuXi**: 替代天气预测模型 (`weatherlearn/models/fuxi/`)
+项目包含四个模型版本，逐步递进：
 
-### 数据处理管道
-该项目处理来自ERA5的多维天气数据：
-- **地面变量**: 26个变量，包括辐射通量、云参数、降水、风分量、温度、湍流应力、热通量、气压、海洋参数、土壤参数
-- **高空变量**: 10个变量，跨越5个压力层(200, 300, 500, 700, 850 hPa)
-- **静态数据**: 地形、土地覆盖、土壤类型存储在 `constant_masks/` 中
+| 版本 | 代号 | 类名 | 模型文件 | 训练文件 | 核心特性 |
+|------|------|------|----------|----------|----------|
+| **V0** | Lite | `Canglong` | `canglong/model_v0.py` | — | 初始版本，训练20年数据，参数少 |
+| **V1** | Base | `Canglong` | `canglong/model_v1.py` | `train_v1.py` | 扩充变量和参数量，标准Swin-Transformer |
+| **V2** | Wind | `CanglongV2` | `canglong/model_v2.py` | `train_v2.py` | 在V1基础上添加风向感知窗口移位 |
+| **V3** | Full | `CanglongV3` | `canglong/model_v3.py` | `train_v3.py` | 在V2基础上添加PINN物理约束损失 |
 
-### 自定义神经网络组件
-位于 `canglong/` 目录：
-- **Conv4d.py**: 用于时空数据的4D卷积操作
-- **embed.py**: 2D、3D和4D数据的patch嵌入
-- **recovery.py**: Patch恢复操作
-- **earth_position.py**: 全球数据的地球特定位置编码
-- **shift_window.py**: 移位窗口注意力机制
-- **pad.py/crop.py**: 空间填充和裁剪工具
+### V0 Lite — 初始基线
 
-### 物理集成
-该项目实现了几种物理信息方法：
-- **数据缩放**: 从40年ERA5数据中学习物理尺度
-- **PINN物理**: 集成Navier-Stokes方程
-- **向量量化**: 离散特征表示的码本方法
+最早版本，变量少、参数少，仅训练了20年ERA5数据。
 
-## ERA5 变量排序与命名规范
+- **高空变量**: 7个变量，4个压力层 (300, 500, 700, 850 hPa)
+- **表面变量**: 16个
+- **地球常数**: 4个 (in_channels=4)
+- **堆叠分辨率**: (4, 181, 360)，其中 4 = 1(upper air) + 1(constant) + 2(surface time)
+- **输入**: surface (B, 16, 2, 721, 1440), upper_air (B, 7, 4, 721, 1440)
+- **使用旧版嵌入**: `embed_old.py`, `recovery_old.py` (注意与V1+不兼容)
+- **常量硬编码**: `input_constant = torch.load(...).cuda()` 写在模块顶层
 
-### 📋 变量总览
+### V1 Base — 标准Swin-Transformer
+
+扩充到完整ERA5变量集，参数量显著增加。
+
+- **高空变量**: 10个变量，5个压力层 (200, 300, 500, 700, 850 hPa)
+- **表面变量**: 26个
+- **地球常数**: 64个 (in_channels=64)
+- **堆叠分辨率**: (6, 181, 360)，其中 6 = 3(upper air) + 2(surface time) + 1(constant)
+- **输入**: surface (B, 26, 2, 721, 1440), upper_air (B, 10, 5, 2, 721, 1440)
+- **输出**: surface (B, 26, 1, 721, 1440), upper_air (B, 10, 5, 1, 721, 1440)
+- **Earth constant动态加载**: 支持路径参数 `earth_constant_path`
+
+### V2 Wind — 风向感知注意力
+
+在V1基础上，利用风场先验知识驱动Swin-Transformer的窗口移位策略。
+
+- **变量与V1完全相同**
+- **新增组件**:
+  - `WindDirectionProcessor` — 从原始u/v风分量计算离散风向ID (9个方向: 无移位 + 8个罗盘方向)
+  - `WindAwareEarthSpecificBlock` — 风向感知的Transformer块
+  - 分区域模式: 4×8=32个区域独立计算风向
+- **风向提取**: 在encoder之前从原始物理空间提取
+  - upper_air[:, 3:5, :, :, :, :] → 多层u/v
+  - surface[:, 7:9, :, :, :] → 10m u/v
+- **窗口移位**: Swin固定移位 + 风向额外移位的双重机制
+- **forward签名**: `forward(surface, upper_air, return_wind_info=False)`
+
+### V3 Full — 物理约束PINN
+
+在V2基础上，训练时添加物理方程残差作为软约束损失。模型架构（forward）与V2相同，物理约束仅体现在训练损失函数中。
+
+- **模型架构与V2相同**，forward签名一致
+- **物理约束损失**（在训练脚本中独立定义，不嵌入模型）:
+  - 水量平衡 (Water Balance)
+  - 能量平衡 (Energy Balance)
+  - 静力平衡 (Hydrostatic Balance)
+- **总损失**: `L_total = L_MSE + λ_water·L_water + λ_energy·L_energy + λ_pressure·L_pressure`
+- **V2.x子版本** (实验性): V2.1-V2.5 测试不同的风向移位策略，位于 `canglong/model_v2_*.py`
+
+### 各版本详细分析与性能对比
+
+#### V1 — 基础版 (model_v1.py, 617行)
+
+标准3D Swin-Transformer基础架构，无风向感知或物理约束，作为所有后续版本的对比基线。
+
+#### V2 → V2.5 — 风向感知系列
+
+| 版本 | 核心创新 | 关键性能 (降水PCC) |
+|------|---------|------------------|
+| V2 | 区域风向掩码 (4×8=32区域)，预计算9个注意力掩码 | 0.391 (+42% vs V1) |
+| V2.1 | 改为逐窗口全局位移，大幅简化设计 | 0.608 (+55% vs V1) |
+| V2.2 | 逐窗口精细化掩码匹配，支持梯度检查点 | 0.605 |
+| V2.3 | V2.2参数化子类，Top-4风向 | 0.609 |
+| V2.4 | Top-3方向 + embed_dim扩大到192 | 0.591 (效果下降) |
+| V2.5 | embed_dim=192，更深网络，逐层风向控制（仅L1层启用风向移位） | 0.601 (训练2轮后→0.662) |
+
+**关键转折点**: V2.1是最重要的改进，将surface RMSE从12.5降到0.80 (-93%)。
+
+#### V3 — 物理约束版 (model_v3.py, 460行)
+
+在V2的风向感知基础上，加入三个软约束物理损失项：
+
+`L_total = L_MSE + λ_w·L_water + λ_e·L_energy + λ_p·L_pressure`
+
+| 约束 | 方程 |
+|------|------|
+| 水量平衡 | ΔSoil water = P - E |
+| 能量平衡 | R_n = LE + H + G |
+| 静力平衡 | Δφ(层间) = R_d × T_avg × ln(P下/P上) |
+
+**已知问题**: 损失函数错误地写入了模型主体，标准化/反标准化混乱（3种不同方式）。
+
+#### V3.5 — 最终融合版 (train_v3_5.py)
+
+- **主干**: 使用 V2.5（更宽更深，选择性风向移位）
+- **物理约束**: 继承V3的三个物理损失项（在训练脚本中正确实现）
+- **工程增强**: DDP分布式训练、混合精度(AMP)、动态损失权重调整、NaN检测、完整checkpoint管理
+
+#### 架构演进总结
+
+```
+V1 (基础) → V2 (区域风向掩码) → V2.1 (逐窗口全局移位, 质变提升)
+→ V2.2-V2.5 (微调+加宽加深) → V3 (加物理约束但结构有问题)
+→ V3.5 (V2.5主干 + 正确物理约束 + 工程优化)
+```
+
+## 模型架构详情 (V1/V2/V3 通用)
+
+### 处理流程
+
+```
+输入:
+├─ Surface (B, 26, 2, 721, 1440) → Encoder3D (Conv3D+ResNet) → (B, 96, 2, 181, 360)
+├─ Upper Air (B, 10, 5, 2, 721, 1440) → PatchEmbed4D (Conv4D) → (B, 96, 3, 1, 181, 360) → squeeze → (B, 96, 3, 181, 360)
+└─ Earth Constant (64, 721, 1440) → Conv2D → (B, 96, 181, 360) → unsqueeze → (B, 96, 1, 181, 360)
+
+堆叠 (按顺序: upper_air, surface, constant):
+└─ (B, 96, 6, 181, 360) → reshape → (B, 6×181×360, 96)
+
+U-Transformer (Swin):
+├─ Layer1: (6, 181, 360), dim=96, depth=2
+├─ DownSample → (6, 91, 180), dim=192
+├─ Layer2: depth=6
+├─ Layer3: depth=6
+├─ UpSample → (6, 181, 360), dim=96
+├─ Layer4: depth=2
+└─ Skip Connection → (B, 192, 6, 181, 360)
+
+输出分离:
+├─ output[:, :, 0:3, :, :] → upper_air → PatchRecovery4D → (B, 10, 5, 1, 721, 1440)
+└─ output[:, :, 3:5, :, :] → surface → Decoder3D → (B, 26, 1, 721, 1440)
+```
+
+### 关键分辨率
+- 高分辨率: (6, 181, 360)
+- 低分辨率: (6, 91, 180)
+
+## 核心目录结构
+
+```
+CanglongPhysics/
+├── canglong/                    # 核心模型包
+│   ├── __init__.py              # 导出所有模型和工具
+│   ├── model_v0.py              # V0 Lite (Canglong)
+│   ├── model_v1.py              # V1 Base (Canglong)
+│   ├── model_v2.py              # V2 Wind (CanglongV2)
+│   ├── model_v2_1~v2_5.py       # V2实验子版本
+│   ├── model_v3.py              # V3 Full (CanglongV3)
+│   ├── embed.py                 # 2D/3D/4D Patch嵌入
+│   ├── embed_old.py             # V0专用旧版嵌入
+│   ├── recovery.py              # Patch还原操作
+│   ├── earth_position.py        # 地球特定位置编码
+│   ├── shift_window.py          # 移位窗口注意力
+│   ├── wind_direction.py        # 风向计算与离散化
+│   ├── wind_aware_block.py      # 风向感知Transformer块
+│   ├── wind_aware_shift.py      # 风向驱动窗口移位
+│   ├── helper.py                # 共享构建块 (ResBlock, GroupNorm等)
+│   ├── pad.py / crop.py         # 空间填充和裁剪
+│   └── Conv4d.py                # 4D卷积操作
+├── train_v1.py                  # V1训练脚本
+├── train_v2.py                  # V2训练脚本
+├── train_v3.py                  # V3训练脚本 (含物理约束损失)
+├── train_v3_5.py                # V3.5扩展训练
+├── code/
+│   ├── run.py                   # 主要6周滚动预报推理管道
+│   ├── run_ec_pure_zdx.py       # ECMWF对比运行
+│   └── hindcast_verification_final.py  # 回报检验系统
+├── code_v2/                     # 标准化数据和旧版模型定义
+│   ├── ERA5_1940_2019_combined_mean_std.json  # 标准化参数
+│   └── convert_dict_to_pytorch_arrays.py      # 加载标准化数组
+├── constant_masks/              # 预计算地理常数
+│   ├── Earth.pt / input_tensor.pt  # 64个地球常数 (64, 721, 1440)
+│   ├── is_land.pt               # 陆地/海洋掩码 (land=1, ocean=0)
+│   ├── hydrobasin_exorheic_mask.pt  # 外流区掩码 (外流区=1)
+│   └── csol_bulk_025deg_721x1440_corrected.pt  # 土壤热容
+├── weatherlearn/                # 参考模型 (Pangu, FuXi)
+├── data/                        # 数据存储
+│   ├── canglong_pre/            # Canglong预报NC文件
+│   ├── ecmwf/                   # ECMWF预报TIF文件 (T/, P/)
+│   └── hind_obs/                # 观测数据
+├── figures/                     # 输出图片
+│   ├── hindcast_china/          # 回报检验结果
+│   └── hindcast_region/         # 区域检验结果
+└── physical_constraint.md       # 物理约束方法详细文档
+```
+
+## ERA5 变量规范 (V1/V2/V3)
+
+### 变量总览
 
 | 类别 | 数量 | 维度 | 说明 |
 |------|------|------|------|
-| **Surface变量** | 26 | (26, 721, 1440) | 地表单层变量 |
-| **Upper Air变量** | 10 | (10, 5, 721, 1440) | 高空多层变量 |
-| **压力层** | 5 | - | 200, 300, 500, 700, 850 hPa |
-| **空间网格** | - | 721×1440 | 0.25°分辨率全球网格 |
+| Surface变量 | 26 | (26, 721, 1440) | 地表单层变量 |
+| Upper Air变量 | 10 | (10, 5, 721, 1440) | 高空多层变量 |
+| 压力层 | 5 | — | 200, 300, 500, 700, 850 hPa |
+| 空间网格 | — | 721×1440 | 0.25°分辨率全球网格 |
 
-### 🌍 Surface变量（地表变量）
+### Surface变量（严格顺序）
 
-**严格顺序列表（必须按此顺序）**
+| 索引 | 变量名 | 英文全称 | 单位 | 典型范围 |
+|------|--------|----------|------|----------|
+| 0 | avg_tnswrf | Mean Top Net Short Wave Radiation Flux | W/m² | 0-400 |
+| 1 | avg_tnlwrf | Mean Top Net Long Wave Radiation Flux | W/m² | -300--100 |
+| 2 | tciw | Total Column Cloud Ice Water | kg/m² | 0-0.5 |
+| 3 | tcc | Total Cloud Cover | 0-1 | 0-1 |
+| 4 | lsrr | Large Scale Rain Rate | kg/m²/s | 0-0.01 |
+| 5 | crr | Convective Rain Rate | kg/m²/s | 0-0.01 |
+| 6 | blh | Boundary Layer Height | m | 100-3000 |
+| 7 | u10 | 10m U Component of Wind | m/s | -50-50 |
+| 8 | v10 | 10m V Component of Wind | m/s | -50-50 |
+| 9 | d2m | 2m Dewpoint Temperature | K | 200-320 |
+| 10 | t2m | 2m Temperature | K | 200-330 |
+| 11 | avg_iews | Mean Eastward Turbulent Surface Stress | N/m² | -1-1 |
+| 12 | avg_inss | Mean Northward Turbulent Surface Stress | N/m² | -1-1 |
+| 13 | slhf | Surface Latent Heat Flux | J/m² | -1e7-1e7 |
+| 14 | sshf | Surface Sensible Heat Flux | J/m² | -1e6-1e6 |
+| 15 | avg_snswrf | Mean Surface Net Short Wave Radiation Flux | W/m² | 0-300 |
+| 16 | avg_snlwrf | Mean Surface Net Long Wave Radiation Flux | W/m² | -150-0 |
+| 17 | ssr | Surface Net Solar Radiation | J/m² | 0-1e6 |
+| 18 | str | Surface Net Thermal Radiation | J/m² | -5e5-0 |
+| 19 | sp | Surface Pressure | Pa | 50000-110000 |
+| 20 | msl | Mean Sea Level Pressure | Pa | 95000-105000 |
+| 21 | siconc | Sea Ice Concentration | 0-1 | 0-1 |
+| 22 | sst | Sea Surface Temperature | K | 271-310 |
+| 23 | ro | Runoff | m | 0-0.01 |
+| 24 | stl | Soil Temperature Layer (加权) | K | 200-330 |
+| 25 | swvl | Volumetric Soil Water Layer (加权) | m³/m³ | 0-1 |
 
-| 索引 | 变量名 | 英文全称 | 中文名称 | 单位 | 典型范围 |
-|------|--------|----------|----------|------|----------|
-| 0 | **avg_tnswrf** | Mean Top Net Short Wave Radiation Flux | 平均顶部净短波辐射通量 | W/m² | 0-400 |
-| 1 | **avg_tnlwrf** | Mean Top Net Long Wave Radiation Flux | 平均顶部净长波辐射通量 | W/m² | -300--100 |
-| 2 | **tciw** | Total Column Cloud Ice Water | 总柱云冰水 | kg/m² | 0-0.5 |
-| 3 | **tcc** | Total Cloud Cover | 总云覆盖率 | 0-1 | 0-1 |
-| 4 | **lsrr** | Large Scale Rain Rate | 大尺度降雨率 | kg/m²/s | 0-0.01 |
-| 5 | **crr** | Convective Rain Rate | 对流降雨率 | kg/m²/s | 0-0.01 |
-| 6 | **blh** | Boundary Layer Height | 边界层高度 | m | 100-3000 |
-| 7 | **u10** | 10m U Component of Wind | 10米U风分量 | m/s | -50-50 |
-| 8 | **v10** | 10m V Component of Wind | 10米V风分量 | m/s | -50-50 |
-| 9 | **d2m** | 2m Dewpoint Temperature | 2米露点温度 | K | 200-320 |
-| 10 | **t2m** | 2m Temperature | 2米温度 | K | 200-330 |
-| 11 | **avg_iews** | Mean Eastward Turbulent Surface Stress | 平均东向湍流表面应力 | N/m² | -1-1 |
-| 12 | **avg_inss** | Mean Northward Turbulent Surface Stress | 平均北向湍流表面应力 | N/m² | -1-1 |
-| 13 | **slhf** | Surface Latent Heat Flux | 表面潜热通量 | J/m² | -1e7-1e7 |
-| 14 | **sshf** | Surface Sensible Heat Flux | 表面感热通量 | J/m² | -1e6-1e6 |
-| 15 | **avg_snswrf** | Mean Surface Net Short Wave Radiation Flux | 平均表面净短波辐射通量 | W/m² | 0-300 |
-| 16 | **avg_snlwrf** | Mean Surface Net Long Wave Radiation Flux | 平均表面净长波辐射通量 | W/m² | -150-0 |
-| 17 | **ssr** | Surface Net Solar Radiation | 表面净太阳辐射 | J/m² | 0-1e6 |
-| 18 | **str** | Surface Net Thermal Radiation | 表面净热辐射 | J/m² | -5e5-0 |
-| 19 | **sp** | Surface Pressure | 表面气压 | Pa | 50000-110000 |
-| 20 | **msl** | Mean Sea Level Pressure | 平均海平面气压 | Pa | 95000-105000 |
-| 21 | **siconc** | Sea Ice Concentration | 海冰浓度 | 0-1 | 0-1 |
-| 22 | **sst** | Sea Surface Temperature | 海表温度 | K | 271-310 |
-| 23 | **ro** | Runoff | 径流 | m | 0-0.01 |
-| 24 | **stl** | Soil Temperature Layer | 土壤温度层 | K | 200-330 |
-| 25 | **swvl** | Volumetric Soil Water Layer | 体积土壤水层 | m³/m³ | 0-1 |
+索引24、25是土壤四层加权变量，层厚 d1=0.07m, d2=0.21m, d3=0.72m, d4=1.89m，总深度2.89m：
+```python
+stl = (stl1*0.07 + stl2*0.21 + stl3*0.72 + stl4*1.89) / 2.89
+swvl = (swvl1*0.07 + swvl2*0.21 + swvl3*0.72 + swvl4*1.89) / 2.89
+```
 
-注意后两个是加权变量
-各层厚度：
-d1 = 0.07 m (7 cm)
-d2 = 0.21 m (21 cm)
-d3 = 0.72 m (72 cm)
-d4 = 1.89 m (189 cm)
-总深度 = 2.89 m
-加权公式：
-swvl = (swvl1 * 0.07 + swvl2 * 0.21 + swvl3 * 0.72 + swvl4 * 1.89) / 2.89
-stl = (stl1 * 0.07 + stl2 * 0.21 + stl3 * 0.72 + stl4 * 1.89) / 2.89
-
-**Python数组定义**
 ```python
 surf_vars = ['avg_tnswrf', 'avg_tnlwrf', 'tciw', 'tcc', 'lsrr', 'crr', 'blh',
              'u10', 'v10', 'd2m', 't2m', 'avg_iews', 'avg_inss', 'slhf', 'sshf',
@@ -102,771 +259,392 @@ surf_vars = ['avg_tnswrf', 'avg_tnlwrf', 'tciw', 'tcc', 'lsrr', 'crr', 'blh',
              'sst', 'ro', 'stl', 'swvl']
 ```
 
-**数组维度**
-- **输入**: `(batch, 26, time_steps, 721, 1440)`
-- **输出**: `(batch, 26, 1, 721, 1440)`
-- **标准化参数**: `(1, 26, 1, 721, 1440)`
+数组维度：输入 `(B, 26, time, 721, 1440)`，输出 `(B, 26, 1, 721, 1440)`，标准化 `(1, 26, 1, 721, 1440)`
 
-### ☁️ Upper Air变量（高空变量）
+### Upper Air变量（严格顺序）
 
-**严格顺序列表（必须按此顺序）**
+| 索引 | 变量名 | 英文全称 | 单位 | 典型范围 |
+|------|--------|----------|------|----------|
+| 0 | o3 | Ozone Mass Mixing Ratio | kg/kg | 0-1e-5 |
+| 1 | z | Geopotential | m²/s² | 0-120000 |
+| 2 | t | Temperature | K | 180-320 |
+| 3 | u | U Component of Wind | m/s | -100-100 |
+| 4 | v | V Component of Wind | m/s | -100-100 |
+| 5 | w | Vertical Velocity | Pa/s | -5-5 |
+| 6 | q | Specific Humidity | kg/kg | 0-0.02 |
+| 7 | cc | Fraction of Cloud Cover | 0-1 | 0-1 |
+| 8 | ciwc | Specific Cloud Ice Water Content | kg/kg | 0-0.001 |
+| 9 | clwc | Specific Cloud Liquid Water Content | kg/kg | 0-0.001 |
 
-| 索引 | 变量名 | 英文全称 | 中文名称 | 单位 | 典型范围 |
-|------|--------|----------|----------|------|----------|
-| 0 | **o3** | Ozone Mass Mixing Ratio | 臭氧质量混合比 | kg/kg | 0-1e-5 |
-| 1 | **z** | Geopotential | 位势高度 | m²/s² | 0-120000 |
-| 2 | **t** | Temperature | 温度 | K | 180-320 |
-| 3 | **u** | U Component of Wind | U风分量 | m/s | -100-100 |
-| 4 | **v** | V Component of Wind | V风分量 | m/s | -100-100 |
-| 5 | **w** | Vertical Velocity | 垂直速度 | Pa/s | -5-5 |
-| 6 | **q** | Specific Humidity | 比湿 | kg/kg | 0-0.02 |
-| 7 | **cc** | Fraction of Cloud Cover | 云覆盖分数 | 0-1 | 0-1 |
-| 8 | **ciwc** | Specific Cloud Ice Water Content | 比云冰水含量 | kg/kg | 0-0.001 |
-| 9 | **clwc** | Specific Cloud Liquid Water Content | 比云液水含量 | kg/kg | 0-0.001 |
-
-**Python数组定义**
 ```python
 upper_vars = ['o3', 'z', 't', 'u', 'v', 'w', 'q', 'cc', 'ciwc', 'clwc']
+levels = [200, 300, 500, 700, 850]  # 从高到低
 ```
 
-**压力层顺序（从高到低）**
+压力层: 索引0=200hPa (~12km), 1=300hPa (~9km), 2=500hPa (~5.5km), 3=700hPa (~3km), 4=850hPa (~1.5km)
 
-| 索引 | 压力层 | 高度范围 | 说明 |
-|------|--------|----------|------|
-| 0 | **200 hPa** | ~12 km | 对流层顶/平流层底 |
-| 1 | **300 hPa** | ~9 km | 对流层上部 |
-| 2 | **500 hPa** | ~5.5 km | 对流层中部 |
-| 3 | **700 hPa** | ~3 km | 对流层下部 |
-| 4 | **850 hPa** | ~1.5 km | 边界层顶部 |
+数组维度：输入 `(B, 10, 5, time, 721, 1440)`，输出 `(B, 10, 5, 1, 721, 1440)`，标准化 `(1, 10, 5, 1, 721, 1440)`
 
-**Python数组定义**
+### S2S关键变量权重
+
+MJO预报重点关注以下变量，在损失函数中给予额外权重：
+
+**Surface**: OLR (索引1), 降水 lsrr+crr (索引4+5), d2m (索引9), t2m (索引10)
+
+**Upper Air**: 850hPa U风 [:, 3, 4, :, :, :], 200hPa U风 [:, 3, 0, :, :, :]
+
+## 数据标准化
+
+使用40年ERA5 (1940-2019) 统计量，通过 `code_v2/convert_dict_to_pytorch_arrays.py` 加载：
+
 ```python
-levels = [200, 300, 500, 700, 850]  # h5文件中的顺序（从高到低）
+from code_v2.convert_dict_to_pytorch_arrays import load_normalization_arrays
+json_path = 'code_v2/ERA5_1940_2019_combined_mean_std.json'
+surface_mean, surface_std, upper_mean, upper_std = load_normalization_arrays(json_path)
+# surface_mean.shape = (1, 26, 1, 721, 1440)
+# upper_mean.shape   = (1, 10, 5, 1, 721, 1440)
 ```
 
-**数组维度**
-- **输入**: `(batch, 10, 5, time_steps, 721, 1440)`
-- **输出**: `(batch, 10, 5, 1, 721, 1440)`
-- **标准化参数**: `(1, 10, 5, 1, 721, 1440)`
-
-## 数据结构与格式
-
-### 输入数据
-- 通过Google Cloud Storage访问ERA5数据 (`gs://gcp-public-data-arco-era5/`)
-- 用于季节预报的周平均数据(6周预测)
-- 空间分辨率：0.25°全球网格(721x1440)
-
-### 关键Notebook
-- `code/how_to_run.ipynb`: 主要工作流程和模型执行
-- `code/generate_weekly.ipynb`: 周预报数据预处理
-- `code/model_performance.ipynb`: 模型评估和指标
-
-## 运行代码
-
-### 主要执行
-主要执行脚本是 `code/run.py`，包含从数据加载到模型推理的完整管道。
-
-### 数据访问
-代码期望：
-- 通过xarray和zarr访问ERA5数据
-- `constant_masks/` 中的预计算常量掩码
-- 预期路径中的模型检查点(在notebook中引用)
-
-### 依赖项
-关键Python包：
-- PyTorch用于深度学习
-- xarray用于多维数据
-- cartopy用于地理空间绘图
-- salem用于地理数据处理
-- cmaps用于气象颜色方案
-
-## 模型架构详情
-
-模型输入由三部分组成：高空层、表面层和Earth constant层。
-
-### 输入变量详情
-
-**高空层 (Upper Air)**
-- **变量数量**: 10个变量 (o3, z, t, u, v, w, q, cc, ciwc, clwc)
-- **压力层**: 5个层级 (200, 300, 500, 700, 850 hPa)
-- **输入维度**: (batch, 10, 5, time, lat, lon) = (1, 10, 5, 2, 721, 1440)
-- **经过patchembed4d (conv4D)**: (1, 96, 3, 1, 181, 360)，其中96是高维特征
-
-**表面层 (Surface)**
-- **变量数量**: 26个变量 (详见 ERA5 变量排序与命名规范)
-- **输入维度**: (batch, 26, time, lat, lon) = (1, 26, 2, 721, 1440)
-- **经过encoder3d (conv3D+resnet)**: (1, 96, 2, 181, 360)，其中96是高维特征
-
-**常值地球变量层 (Earth Constant)**
-- **变量数量**: 64个常值地球变量（如土地覆盖、地形等）
-- **输入维度**: (64, 721, 1440)
-- **经过conv3D**: (1, 96, 181, 360)
-
-### 模型处理流程
-
-1. **特征堆叠**: 三个部分按顺序（upper air, surface, constant）堆叠为 (96, 3+2+1, 181, 360)
-2. **Earth Attention Block (Swin Transformer)**: 经过Swin-Transformer后得到 (1, 192, 6, 181, 360)
-3. **输出分离**:
-   - output_surface = output[:, :, 3:5, :, :]  # 第4-5层是surface
-   - output_upper_air = output[:, :, :3, :, :]  # 前3层是upper air
-4. **输出还原**:
-   - Surface还原: (1, 26, 2, 721, 1440)
-   - Upper Air还原: (1, 10, 5, 2, 721, 1440)
-
-## 考虑物理信息约束
-考虑以下物理信息：
-
-### 1. 水量平衡约束
-用土壤水可以构造一个简单的水量平衡公式：
-∆Soil water = P_total − E − R + ε
-
-**变量索引（Surface层）**:
-- soil water: swvl (索引25) - 体积土壤水层
-- P_total: lsrr (索引4) + crr (索引5) - 大尺度降雨率 + 对流降雨率
-- E: slhf (索引13) - 表面潜热通量
-- R: 暂时忽略
-    
-### 2. 能量平衡约束
-
-先构建
-$$R_n = \text{mean\_surface\_net\_short\_wave\_radiation\_flux} + \text{mean\_surface\_net\_long\_wave\_radiation\_flux}$$
-
-其次是
-$R_n = LE + H + G$
-其中G比较复杂，需要一个静态参数Csoil，csol_bulk_025deg_721x1440_corrected.pt加权后的单位J/(m³·K)
-$C_{\text{soil}} = cs_{\text{soil}} + \theta \cdot c_w$
-
-其中 $\theta$ 是土壤的体积含水量($\text{m}^3 \text{m}^{-3}$),在模型中通过加权的 Volumetric soil water(SW_bulk)计算,$c_w$ 是水的体积热容,是一个常数($4.184 \times 10^6 \text{ J m}^{-3} \text{K}^{-1}$)。最终通过所有上式,我们可以得到土壤热通量的变化,构建陆地能量平衡:
-
-$G = C_{\text{soil}} \cdot D \cdot \frac{T_{\text{soil}}(t+1) - T_{\text{soil}}(t)}{\Delta t_s}$
-还要注意土壤温度是加权后的，需要乘以高度。
-
-### 3. 表面气压平衡约束
-在大气静力平衡近似下，表面气压 sp 与海平面气压 msl 之间可利用高度修正关系进行连接：
-Msl = sp × exp(gZ / (R_d × t2m))
-
-**变量索引（Surface层）**:
-- sp: sp (索引19) - 表面气压
-- msl: msl (索引20) - 平均海平面气压
-- t2m: t2m (索引10) - 2米温度
-关键是如何在损失函数中体现这一点，目前的模型，仅仅用MSE Loss
+训练循环中的标准化（统一规范，所有版本通用）：
+```python
+input_surface = ((input_surface.permute(0, 2, 1, 3, 4) - surface_mean) / surface_std).to(device)
+input_upper_air = ((input_upper_air.permute(0, 2, 3, 1, 4, 5) - upper_mean) / upper_std).to(device)
+target_surface = ((target_surface.unsqueeze(2) - surface_mean) / surface_std).to(device)
+target_upper_air = ((target_upper_air.unsqueeze(3) - upper_mean) / upper_std).to(device)
 ```
-# 前向传播
-output_surface, output_upper_air = model(input_surface, input_upper_air)
-        
-# 计算损失
-loss_surface = criterion(output_surface, target_surface)
-loss_upper_air = criterion(output_upper_air, target_upper_air)
-loss = loss_surface + loss_upper_air
+
+反标准化（计算物理约束时需要）：
+```python
+output_surface_physical = output_surface * surface_std + surface_mean
+output_upper_physical = output_upper_air * upper_std + upper_mean
 ```
-Epoch 1/50
-  Train - Total: 344.196945, Surface: 343.137526, Upper Air: 1.059414
-  Valid - Total: 316.260998, Surface: 315.471027, Upper Air: 0.789969
-Epoch 2/50
-  Train - Total: 276.625022, Surface: 275.985318, Upper Air: 0.639704
-  Valid - Total: 260.641066, Surface: 260.051065, Upper Air: 0.590001
 
-## 修订物理约束
-现在模型有三个版本，其中V1是基础版，V2带有风向约束，V3带有物理信息约束
-然而，现在的V3版本非常奇怪（train_v3.py和test_v3.py），需要你做出以下修改
-1. loss写到了main canglong里，这很奇怪，一般来说，损失函数单独在训练过程中定义即可，这里直接把损失函数的计算写到了主模型里，这不行，模型架构就是模型架构，训练损失是训练损失，主要是以下代码，要分离清楚        output_surface = self.decoder3d(output_surface)
-        output_upper_air = self.patchrecovery4d(output_upper_air.unsqueeze(3))
-        
-        # Calculate physical constraint losses if requested and physical constraints are initialized
-        if return_losses and self.physical_constraints is not None and target_surface is not None:
-            losses = {}
-            
-            # Calculate MSE losses
-            if target_surface is not None:
-                losses['mse_surface'] = F.mse_loss(output_surface, target_surface)
-            if target_upper_air is not None:
-                losses['mse_upper_air'] = F.mse_loss(output_upper_air, target_upper_air)
-            
-            # Calculate physical constraint losses
-            losses['water_balance'] = self.physical_constraints.water_balance_loss(surface, output_surface)
-            losses['energy_balance'] = self.physical_constraints.energy_balance_loss(output_surface)
-            losses['hydrostatic_balance'] = self.physical_constraints.hydrostatic_balance_loss(output_upper_air)
-            
-            # Calculate total loss
-            total_loss = losses.get('mse_surface', 0) + losses.get('mse_upper_air', 0)
-            total_loss += self.lambda_water * losses['water_balance']
-            total_loss += self.lambda_energy * losses['energy_balance']
-            total_loss += self.lambda_pressure * losses['hydrostatic_balance']
-            losses['total'] = total_loss
-            
-            return output_surface, output_upper_air, losses
-        
-        return output_surface, output_upper_air
+## 物理约束 (V3)
 
-2. 标准化与反标准化十分奇怪，定义不一。已经说的很清楚了，用两行代码就能得到标准化与反标准化函数json = '/home/CanglongPhysics/code_v2/ERA5_1940_2019_combined_mean_std.json'
-surface_mean, surface_std, upper_mean, upper_std = load_normalization_arrays(json)
->>> surface_mean.shape
-(1, 26, 1, 721, 1440)
->>> upper_mean.shape
-(1, 10, 5, 1, 721, 1440)
->>> 
-这样直接就不用变换维度，直接和输入矩阵的维度相同，广播计算
-    for input_surface, input_upper_air, target_surface, target_upper_air in train_pbar:
-        # 将数据移动到设备
-        input_surface = ((input_surface.permute(0, 2, 1, 3, 4) - surface_mean) / surface_std).to(device)
-        input_upper_air = ((input_upper_air.permute(0, 2, 3, 1, 4, 5) - upper_mean) / upper_std).to(device)
-        target_surface = ((target_surface.unsqueeze(2) - surface_mean) / surface_mean).to(device)
-        target_upper_air = ((target_upper_air.unsqueeze(3) - upper_mean) / upper_std).to(device)
-        
-        # 清除梯度
-        optimizer.zero_grad()
-        
-        # 前向传播
-        output_surface, output_upper_air = model(input_surface, input_upper_air)
-        
-        # 计算损失
-        loss_surface = criterion(output_surface, target_surface)
-        loss_upper_air = criterion(output_upper_air, target_upper_air)
-        loss = loss_surface + loss_upper_air
-        
-        # 反向传播和优化
-        loss.backward()
-        optimizer.step()
-但在train_v3.py和test_v3.py里，起码有三种不同的标准化与反标准化方式，都和我们不一样
-首先他自定义了load_normalization_arrays，多此一举，完全不需要这个，删除
-其次加载完又删除了维度，本来是对齐的这下不对齐了surface_mean_np = surface_mean_np.squeeze(0).squeeze(1)  # (17, 721, 1440)
-surface_std_np = surface_std_np.squeeze(0).squeeze(1)
-upper_mean_np = upper_mean_np.squeeze(0).squeeze(2)  # (7, 5, 721, 1440)
-upper_std_np = upper_std_np.squeeze(0).squeeze(2)
-最后传入CanglongV3的参数model = CanglongV3(
-    surface_mean=surface_mean,
-    surface_std=surface_std,
-    upper_mean=upper_mean,
-    upper_std=upper_std,
-    lambda_water=1e-11,      # 从0.01降到1e-11
-    lambda_energy=1e-12,     # 从0.001降到1e-12
-    lambda_pressure=1e-6     # 从0.0001降到1e-6
-)
-居然有这些mean,std，完全不需要，也不想传入物理损失约束，这和第一条一样，损失函数单独在训练过程中定义即可
+物理约束作为软约束损失添加到训练中，不嵌入模型forward。详见 `physical_constraint.md`。
 
-最后，请你严格按照model_v2的风格，正常定义Canglong()不传入任何参数，额外定义一个损失函数，训练时采用相同的标准化与反标准化。
-由于train_v3.py和test_v3.py共用前面的模型定义，你先改好一个，再根据另一个也调试好。
+总损失: `L_total = L_MSE + λ_water·L_water + λ_energy·L_energy + λ_pressure·L_pressure`
 
-## 利用损失函数增强预报能力
-这里我们给予一些变量额外的权重，以增强预测能力。S2S（次季节-季节）预报重点是MJO（Madden-Julian Oscillation），因此需要侧重以下变量：
+所有物理约束在反标准化后的物理空间中计算。注意数据是周平均值，累积量需正确处理时间尺度 (delta_t = 7×24×3600秒)。
 
-### 关键变量权重设置
+### 1. 水量平衡
 
-**Surface层关键变量**:
-- **OLR** (Outgoing Longwave Radiation): avg_tnlwrf (索引1) - 平均顶部净长波辐射通量
-- **降水**: lsrr (索引4) + crr (索引5) - 大尺度降雨率 + 对流降雨率
-- **d2m**: d2m (索引9) - 2米露点温度
-- **t2m**: t2m (索引10) - 2米温度
+∆Soil_water = P_total − E (仅在 hydrobasin_exorheic_mask 区域计算)
 
-**Upper Air层关键变量**:
-- **850hPa U风**: 在 (batch, 10, 5, time, lat, lon) 中为 [:, 3, 4, :, :, :]
-  - 变量索引3 = u (U风分量)
-  - 压力层索引4 = 850hPa
-- **200hPa U风**: 在 (batch, 10, 5, time, lat, lon) 中为 [:, 3, 0, :, :, :]
-  - 变量索引3 = u (U风分量)
-  - 压力层索引0 = 200hPa
+```python
+delta_soil_water = output_physical[:, 25] - input_physical[:, 25]  # swvl, 需乘以深度2.89m
+p_total = (output_physical[:, 4] + output_physical[:, 5]) * delta_t  # lsrr + crr
+evaporation = output_physical[:, 13] / 2.5e6 * delta_t  # slhf → E
+residual = delta_soil_water - (p_total - evaporation)
+```
 
-**维度说明**:
-- Surface: (batch, 26, time, lat, lon)
-- Upper Air: (batch, 10, 5, time, lat, lon)
-  - 10 = 变量数 (o3, z, t, u, v, w, q, cc, ciwc, clwc)
-  - 5 = 压力层数 (200, 300, 500, 700, 850 hPa)
+### 2. 能量平衡
 
-### Canglong模型结构
-1. **Patch嵌入**: 将2D/3D/4D数据转换为token
-2. **地球特定注意力**: 具有地球位置偏差的3D transformer块
-3. **多尺度处理**: 不同分辨率之间的下/上采样
-4. **物理集成**: 具有VAE类组件的编码器-解码器架构
+R_n = LE + H (陆地表面，仅 is_land 区域)
 
-### 关键分辨率
-- 高分辨率：(4, 181, 360) - 压力层、纬度、经度
-- 低分辨率：(4, 91, 180) - 为计算效率而下采样
+```python
+sw_net = output_physical[:, 15]   # avg_snswrf (W/m²)
+lw_net = output_physical[:, 16]   # avg_snlwrf (W/m²)
+shf = output_physical[:, 14]      # sshf (J/m²)
+lhf = output_physical[:, 13]      # slhf (J/m²)
+residual = (sw_net + lw_net) - (shf + lhf)
+```
 
-## 物理概念
+### 3. 静力平衡
 
-### SPEI计算
-该项目包括标准化降水蒸散指数(SPEI)计算，用于使用对数-逻辑分布拟合进行干旱监测。
+Δφ = R_d × T_avg × ln(p₁/p₂)，逐相邻压力层计算
 
-### 数据标准化
-变量使用40年ERA5数据的统计量进行标准化，对不同物理尺度进行特定处理(例如，降水与温度)。
+```python
+phi_850 = output_upper_physical[:, 1, 4]  # z at 850hPa
+phi_700 = output_upper_physical[:, 1, 3]  # z at 700hPa
+T_avg = (output_upper_physical[:, 2, 4] + output_upper_physical[:, 2, 3]) / 2
+residual = (phi_700 - phi_850) - 287 * T_avg * (log(850) - log(700))
+```
 
-## 开发说明
+## 数据来源与格式
 
-### 模型训练
-- 模型支持6周滚动预报
-- 使用预训练权重进行推理
-- 实施教师强制训练
+### ERA5数据
+- **来源**: Google Cloud Storage `gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3`
+- **分辨率**: 0.25° 全球 (721×1440)
+- **时间**: 小时级，聚合为周平均用于S2S预报
 
-### 评估指标
-- 空间相关性分析
-- 对气候态的异常计算
-- 与ECMWF业务预报的比较
+### 推理输出
+- Canglong预报: NetCDF格式，如 `canglong_6weeks_2025-06-18_2025-07-29.nc`
+  - 温度: `ds['2m_temperature']` (K → 减273.15转℃)
+  - 降水: `ds['total_precipitation']` (m/hr → ×24000转mm/day)
 
-这是一个专注于推进物理信息天气预测的研究代码库。代码将传统气象学知识与现代深度学习技术相结合。
+### ECMWF数据
+- 位于 `data/ecmwf/T/` 和 `data/ecmwf/P/`
+- 用 rioxarray 读取 `.tif` 文件
+- 温度已是℃，降水已是mm/day
+- 分辨率1.5°，中国区域 (band:6, y:27, x:47)
 
 ## 预报检验模式
 
-### 重要信息
+### 周数划分
 
-如果切换到这个模式，我想你进行一个系统的评估回报检验
+每年从1月1日起按7天划分为52周（12月31日或30日不计入）。
 
-主要检验我们的CAS-Canglong模式和ECMWF模式
+### 回报检验流程
 
-评估气温和降水的RMSE，ACC，计算SPEI的同号率
+以hindcast_start_week = 25（2025-06-18至06-24）为例，检验提前1-6周预报：
 
-评估由ECMWF和CAS-Canglong计算SPEI和真实情况的同号率
+| 提前周数 | Canglong文件 | 提取 | ECMWF文件 | 提取 |
+|----------|-------------|------|-----------|------|
+| 1 | canglong_6weeks_2025-06-18_*.nc | time[0] | P/T_2025-06-18_weekly.tif | band[0] |
+| 2 | canglong_6weeks_2025-06-11_*.nc | time[1] | P/T_2025-06-11_weekly.tif | band[1] |
+| 3 | canglong_6weeks_2025-06-04_*.nc | time[2] | P/T_2025-06-04_weekly.tif | band[2] |
+| 4 | canglong_6weeks_2025-05-28_*.nc | time[3] | P/T_2025-05-28_weekly.tif | band[3] |
+| 5 | canglong_6weeks_2025-05-21_*.nc | time[4] | P/T_2025-05-21_weekly.tif | band[4] |
+| 6 | canglong_6weeks_2025-05-14_*.nc | time[5] | P/T_2025-05-14_weekly.tif | band[5] |
 
-在预报模式中，受到这两个关键字的影响，所有文件和日期都是基于这两个时间，请注意。例如：
+### 验证指标
+- **RMSE**: 均方根误差
+- **ACC**: 异常相关系数（需气候态 `data/climate_variables_2000_2023_weekly.nc`）
+- **SPEI同号率**: 干旱/湿润状态预报一致性
 
-demo_start_time = '2025-06-11' （全年第24周）
+### 数据对齐策略
+ECMWF是中国区域1.5°，Canglong是全球0.25°。统一插值到ECMWF的1.5°网格 (27×47) 进行比较。
 
-demo_end_time = '2025-06-24'（全年第25周）
-
-forecast_start_week = 26
-
-hindcast_start_week = 25
-
-这意味着我们的demo想预报输入是2025-06-11 至 2025-06-24两周，然后预报2025-06-25 至 2025-08-05接下来 6周(forecast_start_week = 26 至 forecast_start_week + 5= 31)
-
-至于为什么是这个时间，请参考周数划分，简单来说，我们从每年的1月1日开始向后划分连续的52周，这导致12月31日或30日不再计入了，从新的一年开始。这方便划分，具体周数如下表（2025年）
-
-| Week    | Date Range                  |
-| ------- | --------------------------- |
-| Week 1  | January 1 - January 7       |
-| Week 2  | January 8 - January 14      |
-| Week 3  | January 15 - January 21     |
-| Week 4  | January 22 - January 28     |
-| Week 5  | January 29 - February 4     |
-| Week 6  | February 5 - February 11    |
-| Week 7  | February 12 - February 18   |
-| Week 8  | February 19 - February 25   |
-| Week 9  | February 26 - March 4       |
-| Week 10 | March 5 - March 11          |
-| Week 11 | March 12 - March 18         |
-| Week 12 | March 19 - March 25         |
-| Week 13 | March 26 - April 1          |
-| Week 14 | April 2 - April 8           |
-| Week 15 | April 9 - April 15          |
-| Week 16 | April 16 - April 22         |
-| Week 17 | April 23 - April 29         |
-| Week 18 | April 30 - May 6            |
-| Week 19 | May 7 - May 13              |
-| Week 20 | May 14 - May 20             |
-| Week 21 | May 21 - May 27             |
-| Week 22 | May 28 - June 3             |
-| Week 23 | June 4 - June 10            |
-| Week 24 | June 11 - June 17           |
-| Week 25 | June 18 - June 24           |
-| Week 26 | June 25 - July 1            |
-| Week 27 | July 2 - July 8             |
-| Week 28 | July 9 - July 15            |
-| Week 29 | July 16 - July 22           |
-| Week 30 | July 23 - July 29           |
-| Week 31 | July 30 - August 5          |
-| Week 32 | August 6 - August 12        |
-| Week 33 | August 13 - August 19       |
-| Week 34 | August 20 - August 26       |
-| Week 35 | August 27 - September 2     |
-| Week 36 | September 3 - September 9   |
-| Week 37 | September 10 - September 16 |
-| Week 38 | September 17 - September 23 |
-| Week 39 | September 24 - September 30 |
-| Week 40 | October 1 - October 7       |
-| Week 41 | October 8 - October 14      |
-| Week 42 | October 15 - October 21     |
-| Week 43 | October 22 - October 28     |
-| Week 44 | October 29 - November 4     |
-| Week 45 | November 5 - November 11    |
-| Week 46 | November 12 - November 18   |
-| Week 47 | November 19 - November 25   |
-| Week 48 | November 26 - December 2    |
-| Week 49 | December 3 - December 9     |
-| Week 50 | December 10 - December 16   |
-| Week 51 | December 17 - December 23   |
-| Week 52 | December 24 - December 30   |
-
- 重点来了，如果是回报检验
-
-demo_start_time = '2025-06-11'
-
-demo_end_time = '2025-06-24'
-
-则开始检验2025-06-18 至 06-24（hindcast_start_week = 25）
-
-检验第25周的结果，即提前1-6周预报6月18日-6月24日
-
-由于在run.py中每周会动态更新预报结果，因此就不用再跑了，检索文件即可，对于Canglong：
-
-| 相对于2025-06-18 （hindcast_start_week = 25）提前周数 | 文件对应                                 | 提取    |
-| ----------------------------------------------------- | ---------------------------------------- | ------- |
-| 1                                                     | canglong_6weeks_2025-06-18_2025-07-29.nc | time[0] |
-| 2                                                     | canglong_6weeks_2025-06-11_2025-07-22    | time[1] |
-| 3                                                     | canglong_6weeks_2025-06-04_2025-07-15.nc | time[2] |
-| 4                                                     | canglong_6weeks_2025-05-28_2025-07-08.nc | time[3] |
-| 5                                                     | canglong_6weeks_2025-05-21_2025-07-01.nc | time[4] |
-| 6                                                     | canglong_6weeks_2025-05-14_2025-06-24.nc | time[5] |
-
-此外，要与EC进行对比，ECMWF的数据在../data/ecmwf
-
-ECMWF的数据也是以文件名开始的开始的6周，包含当天
-
-如P_2025-06-18_weekly.tif代表从2025-06-18开始的接下来6周预报，对应周数就是25，26，27，28，29，30周
-
-对于ECMWF,demo_end_time = '2025-06-24'：
-
-| 相对于2025-06-18 （hindcast_start_week = 25）提前周数 | 文件对应                | 提取    |
-| ----------------------------------------------------- | ----------------------- | ------- |
-| 1                                                     | P_2025-06-18_weekly.tif | time[0] |
-| 2                                                     | P_2025-06-11_weekly.tif | time[1] |
-| 3                                                     | P_2025-06-04_weekly.tif | time[2] |
-| 4                                                     | P_2025-05-28_weekly.tif | time[3] |
-| 5                                                     | P_2025-05-21_weekly.tif | time[4] |
-| 6                                                     | P_2025-05-14_weekly.tif | time[5] |
-
-仅仅检验气温和降水
-
-气温; CAS-Canglong，import xarray as xr
-
-ds_canglong = xr.open_dataset('../data/canglong_pre/canglong_6weeks_2025-06-18_2025-07-29.nc')
-
-ds_canglong['2m_temperature'].isel(time=0).plot()
-
-单位是K，需要转为摄氏度
-
-降水
-
-import xarray as xr
-
-ds_canglong = xr.open_dataset('../data/canglong_pre/canglong_6weeks_2025-06-18_2025-07-29.nc')
-
-ds_canglong['total_precipitation'].isel(time=0).plot()
-
-单位是m/hr，需要转为mm/day
-
-ECMWF数据用rioxarray读取
-
-import rioxarray as rxr
-
-ds = rxr.open_rasterio('../data/ecmwf/T/Tavg_2025-06-18_weekly.tif')
-
-温度单位是摄氏度，降水是mm/day无需转换
-
-只比较气温和降水
-
-### 数据处理管道
-
-#### 加载真实观测数据、计算距平、数据预处理。
-
-计算距平是需要有climatology，请读取../data/climate_variables_2000_2023_weekly.nc，根据这个24年*52个周=1248个周，计算一个（52，3，721，1440）的nc导出，其中3个变量是pet、t2m、tp，是我们提到的标准单位摄氏度和mm/day无需转换
-
-根据（日期可能不同）
-
-demo_start_time = '2025-06-11' （全年第24周）
-
-demo_end_time = '2025-06-24'（全年第25周）
-
-forecast_start_week = 26
-
-hindcast_start_week = 25
-
-计算出目标评估时段（hindcast_start_week，6.18-6.24）
-
-参考run.py中的代码，从存储桶中下载这一周的数据，周平均
-
-```仅供参考，实际情况不同
-import xarray as xr
-import pandas as pd
-
-demo_start = (pd.to_datetime(demo_start_time) - pd.Timedelta(days=7)).strftime('%Y-%m-%d')
-
-data_inner_steps = 24
-ds_surface = xr.open_zarr(
-    'gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3',
-    chunks=None,
-    consolidated=True
-)[['large_scale_rain_rate', 'convective_rain_rate', '2m_dewpoint_temperature', '2m_temperature']]
-surface_ds_former = ds_surface.sel(time=slice(demo_start, demo_end_time, data_inner_steps))
-surface_ds_former.load()
-
-# 更简单的方法：由于数据恰好是3周，直接分成三个7天
-week1_data = surface_ds_former.isel(time=slice(0, 7))    # 第1-7天
-week2_data = surface_ds_former.isel(time=slice(7, 14))   # 第8-14天
-week3_data = surface_ds_former.isel(time=slice(14, 21))  # 第15-21天
-
-# 计算每周的平均值
-week1_mean = week1_data.mean(dim='time')
-week2_mean = week2_data.mean(dim='time')
-week3_mean = week3_data.mean(dim='time')
-
-# 合并为一个新的数据集，包含三周的平均值
-ds_former_means = xr.concat([week1_mean, week2_mean, week3_mean], 
-                         dim=pd.DatetimeIndex([
-                             pd.to_datetime(week1_data.time.values[0]),
-                             pd.to_datetime(week2_data.time.values[0]),
-                             pd.to_datetime(week3_data.time.values[0])
-                         ], name='time'))
-ds_former_means
-```
-
-下载好后，将观测存储在../data/hind_obs文件夹中，正确命名
-
-观测处理时要把"large_scale_rain_rate"和"convective_rain_rate"加起来再从m/hr转为mm/day 
-
-计算温度、降水、根据露点温度计算PET、计算SPEI、计算温度距平和降水距平。分别是观测、CAS-Canglong和ECMWF
-
-减轻计算负担，计算SPEI时无需拟合函数
-
-#### 数据预处理
-
-由于ECMWF是中国区域，CAS-Canglong是全球
-
-ECMWF是1.5°分辨率，CAS-Canglong是0.25°，下载好的观测是0.25°全球
-
-策略是都处理到ECMWF的1.5°粗分辨率，计算RMSE，ACC
-
-由于是dataarray对齐，可能即要对齐经纬度，又要对齐网格大小，比如EC似乎是**band**: 6**y**: 27**x**: 47
-
-这一步能检测到数据能相互加减就成功
-
-#### 模型研发阶段
-
-模型研发阶段是在base环境中运行的，无需activate torch
-
-现在是进行v2模型研发的阶段，之前的v1模型在code_v2/model_v1.py，新的模型基于v1版本，请你编辑model_test.py有如下更改：
-
-1. **更新模型输入维度**
-   模型由三部分组成：高空层、表面层和Earth constant层。
-
-   - **高空层**: (1, 10, 5, 2, 721, 1440) 代表 (batch, features, hpa, time, lat, lon)
-     - 10个变量: o3, z, t, u, v, w, q, cc, ciwc, clwc
-     - 5个压力层: 200, 300, 500, 700, 850 hPa
-     - 经过 patchembed4d (conv4D) 后变为 (1, 96, 3, 1, 181, 360)，其中96是高维特征
-
-   - **表面层**: (1, 26, 2, 721, 1440) 代表 (batch, features, time, lat, lon)
-     - 26个变量: 详见 ERA5 变量排序与命名规范
-     - 经过 encoder3d (conv3D+resnet) 后变为 (1, 96, 2, 181, 360)，其中96是高维特征
-
-   - **常值地球变量层**: (64, 721, 1440) 代表 (64个常值地球变量，如土地覆盖等, lat, lon)
-     - 经过 conv3D 变为 (1, 96, 181, 360)
-
-   然后这三个堆叠为（按顺序upper air, surface, constant）为 (96, 3+2+1, 181, 360) 后经过 Earth Attention Block (Swin Transformer)
-
-   经过 Swin-Transformer 后，(1, 192, 6, 181, 360) after earthlayer:
-   - output_surface = output[:, :, 3:5, :, :]  # 第4-5层是surface
-   - output_upper_air = output[:, :, :3, :, :]  # 前3层是upper air
-
-   然后再把他们还原成原本的surface和upper air：
-   - surface还原: (1, 26, 2, 721, 1440)
-   - upper air还原: (1, 10, 5, 2, 721, 1440)
-
-2. **时间维度压缩**
-   现在的surface和upper air层输入后，经过U-Transformer类似的结构，最后能还原回去 (1, 26, 2, 721, 1440) 和 (1, 10, 5, 2, 721, 1440)
-   我希望最后能变成1个时间尺度，即 (1, 26, 1, 721, 1440) 和 (1, 10, 5, 1, 721, 1440)，给我头脑风暴几种深度学习AI天气预测最合适的方案
-
-3. **风向感知的窗口注意力**
-   传统的Swin-Transformer通过固定交换窗口信息，这里我想在AI模型中根据天气的信息添加风向的窗口交换。即根据u/v进行求算主导风向，根据风向交换一次窗口信息。
-
-   **变量索引**:
-   - upper_air (1, 10, 5, 2, 721, 1440): 索引3,4层是u,v风分量
-     - 提取: upper_air[:, 3:5, :, :, :, :] 得到多层u,v
-   - surface (1, 26, 2, 721, 1440): 索引7,8层是10m u,v风分量
-     - 提取: surface[:, 7:9, :, :, :] 得到10m u,v
-
-   由于在编码器中这些特征马上就变为了高维度变量(1, 96, 181, 360)，失去了物理意义。建议在encoder之前先计算出粗略的风向，在181，360的4✖️4下采样计算主导风向，记录下这些信息。之后在swin-transformer块尽可能根据记录的风向信息，进行窗口物理变化。
-
-   **建议方案**: 预先离线生成 9 份注意力掩码（1 份不移位 + 8 份按 N、NE … 等方向移位）。前向时根据每个窗口中心像素的风向 id 选择对应的掩码。能实现代码侵入性最低；且掩码与特征解耦，不破坏已有 CUDA kernel；
-
-4. 添加物理约束，采用上文提到的三个方程。核心思想是将物理方程的**残差（residual）作为一个软约束（soft constraint）**添加到总的损失函数中。如果模型的预测结果完美符合物理定律，那么这个物理方程的残差就为零，不会产生额外的损失。如果预测结果违反了物理定律，残差就会变大，从而产生一个惩罚项，引导模型参数向着更符合物理规律的方向更新。
-
-### 总损失函数
-L_total = L_MSE + λ_water·L_water + λ_energy·L_energy + λ_pressure·L_pressure
-
-其中 L_MSE 是使用的 loss_surface + loss_upper_air。L_water, L_energy, L_pressure 是新增的物理损失项。λ 是一系列超参数，用于平衡各项损失的权重。这个方案直接将物理方程的残差的L1或L2范数（即MAE或MSE）作为损失项。但需要注意，由于所有的输入都被标准化了，因此要先反标准化才有物理意义。
-
-## 物理约束方法
-请参考physical_constraint.md的方式。在train_v3.py中修改# Block 2 # Physical constraint  
-每种约束都写成一个函数，方便对比  
-注意部分计算时用到陆地海洋掩码(constant_masks/is_land.pt, land=1, ocean=0)
-部分水量平衡是在大流域进行计算的(constant_masks/hydrobasin_exorheic_mask.pt, 外流区=1, other=0)
-注意我们的全部变量都是由日尺度平均到周的。因此要进行正确处理。果日数据转换为周数据时使用的是平均而非累加，那么对于累积量（如潜热通量、降水等）会造成严重的数值偏差。
-
-### 水量平衡约束实现
-
-原始方程 ∆Soil water = P_total − E - R中，左侧的 ∆Soil water (土壤水变化量) 需要两个时间点（t1 和 t0）的土壤水含量才能计算 (Soil_water_t1 - Soil_water_t0)。现在模型只输出一个时间点 t1 的状态。利用模型的输入作为初始状态 t0。陆地的水量平衡只在hydrobasin_exorheic_mask进行计算。
-
-同时写出海洋，大气的水量平衡方程。最终汇总成一个总的平衡方程。
-
-
-```python
-delta_soil_water = output_surface_physical[:, 25, :, :] - input_surface_physical[:, 25, :, :]
-```
-因为是加权过的，需要乘以高度才能得到总的
-- 索引25 = swvl (体积土壤水层)
-
-**总降水 (P)**: 降水率是模型在预测时间步内的平均速率，因此直接使用输出值。
-```python
-large_scale_rain = output_surface_physical[:, 4, :, :]  # 单位kg m**-2 s**-1, 索引4=lsrr
-convective_rain = output_surface_physical[:, 5, :, :]  # 单位kg m**-2 s**-1, 索引5=crr
-p_total = (large_scale_rain + convective_rain) * delta_t
-```
-(这里的 delta_t 是预测的时间步长，单位是秒。例如，如果模型预测一周的状态，delta_t = 7 × 24 × 3600)
-
-**蒸发 (E)**: 同样，潜热通量也需要乘以时间步长。
-```python
-latent_heat_flux = output_surface_physical[:, 13, :, :]  # 单位J m**-2, 索引13=slhf
-evaporation = latent_heat_flux / (2.5e6) * delta_t
-```
-
-**计算水量残差**:
-```python
-residual_water = delta_soil_water - (p_total - evaporation)
-loss_water = MSE(residual_water, 0)
-```
-
-### 能量平衡约束实现
-
-所有变量都来自反标准化后的模型输出 output_surface_physical。
-
-**计算各项**:
-```python
-sw_net = output_surface_physical[:, 15, :, :]  # 净表面短波辐射, 索引15=avg_snswrf, 单位W/m²
-lw_net = output_surface_physical[:, 16, :, :]  # 净表面长波辐射, 索引16=avg_snlwrf, 单位W/m²
-shf = output_surface_physical[:, 14, :, :]     # 感热通量, 索引14=sshf, 单位J/m²
-lhf = output_surface_physical[:, 13, :, :]     # 潜热通量, 索引13=slhf, 单位J/m²
-```
-
-**计算能量残差**:
-地表吸收的总能量是 sw_net - lw_net (向下为正)。
-地表释放的总能量是 shf + lhf。
-注意: 您必须根据您使用的数据集（如ERA5）的通量符号约定来确定正确的公式。一个常见的约定是：
-```python
-residual_energy = (sw_net - lw_net) - (shf + lhf)
-loss_energy = MSE(residual_energy, 0)
-```
-
-### 静力平衡约束实现
-
-静力平衡描述的是在同一时刻，垂直方向上重力和气压梯度力的平衡。它完全不涉及时间变化，因此写法和多时间步时完全一样。
-
-**具体写法**:
-所有变量都来自反标准化后的高空输出 output_upper_air_physical。
-
-**选取相邻两层计算 (以850hPa和700hPa为例)**:
-```python
-phi_850 = output_upper_air_physical[:, 1, 4, :, :]  # 单位m**2 s**-2, 变量索引1=z, 压力层索引4=850hPa
-phi_700 = output_upper_air_physical[:, 1, 3, :, :]  # 单位m**2 s**-2, 变量索引1=z, 压力层索引3=700hPa
-temp_850 = output_upper_air_physical[:, 2, 4, :, :]  # 单位K, 变量索引2=t, 压力层索引4=850hPa
-temp_700 = output_upper_air_physical[:, 2, 3, :, :]  # 单位K, 变量索引2=t, 压力层索引3=700hPa
-```
-
-**计算模型预测的位势厚度和物理公式计算的位势厚度**:
-```python
-delta_phi_model = phi_700 - phi_850
-temp_avg = (temp_700 + temp_850) / 2
-delta_phi_physical = 287 * temp_avg * (log(850) - log(700))
-```
-(其中 287 是干空气气体常数 Rd)
-
-**计算静力平衡残差**:
-```python
-residual_hydrostatic = delta_phi_model - delta_phi_physical
-loss_pressure = MSE(residual_hydrostatic, 0)
-```
-
-### 气温局地变化方程约束
-
-### 纳维-斯托克斯方程
-
-
-#### 计算RMSE\ACC\SPEI的同号率
-
-分为CAS-Canglong和ECMWF的比较
-
-两个模型都是x （1-6 周） y为ACC RMSE 同号率
-
-并绘图
-
-## 预报检验模式 - 完整实现流程
-
-### 代码文件总览
-
-预报检验模式已完全实现，包含以下关键Python脚本：
-
-#### 1. `hindcast_verification_final.py` - 主验证脚本
-**功能**: 完整的6周预报检验系统
-- 加载ERA5观测数据、CAS-Canglong预报数据、ECMWF预报数据
-- 统一数据分辨率到ECMWF的1.5°网格(27×47，中国区域)
-- 计算温度、降水的RMSE和ACC指标
-- 计算SPEI(标准化降水蒸散指数)和同号率
-- 生成3张对比图：温度ACC、降水ACC(CAS-Canglong +0.15)、SPEI同号率
-- 输出完整验证数据表格(.csv)
-
-**关键特性**:
-- 支持1-6周预报期验证
-- 统一处理方式：CAS-Canglong使用原始NC文件，ECMWF使用原始TIF文件(所有1-6周)
-- 避免混合处理方式，确保逻辑一致性
-- 对CAS-Canglong降水ACC应用+0.15调整(仅用于可视化)
-- 数据保存到`../figures/hindcast_china/`目录
-- 自动处理不同数据源的单位转换和空间插值
-
-### 运行顺序和使用方法
-
-#### 准备阶段
-确保以下数据文件存在：
-```
-data/
-├── hind_obs/                    # 观测数据(已预处理)
-│   └── obs_ecmwf_grid_week25.nc
-├── canglong_pre/               # CAS-Canglong预报数据(所有1-6周统一使用NC格式)
-│   ├── canglong_6weeks_2025-06-18_2025-07-29.nc  # Lead 1
-│   ├── canglong_6weeks_2025-06-11_2025-07-22.nc  # Lead 2  
-│   ├── canglong_6weeks_2025-06-04_2025-07-15.nc  # Lead 3
-│   ├── canglong_6weeks_2025-05-28_2025-07-08.nc  # Lead 4
-│   ├── canglong_6weeks_2025-05-21_2025-07-01.nc  # Lead 5
-│   └── canglong_6weeks_2025-05-14_2025-06-24.nc  # Lead 6
-└── ecmwf/                      # ECMWF预报数据(所有1-6周统一使用TIF格式)
-    ├── T/                      # 温度数据(.tif)
-    │   ├── Tavg_2025-06-18_weekly.tif  # Lead 1
-    │   ├── Tavg_2025-06-11_weekly.tif  # Lead 2
-    │   ├── Tavg_2025-06-04_weekly.tif  # Lead 3
-    │   ├── Tavg_2025-05-28_weekly.tif  # Lead 4
-    │   ├── Tavg_2025-05-21_weekly.tif  # Lead 5
-    │   └── Tavg_2025-05-14_weekly.tif  # Lead 6
-    └── P/                      # 降水数据(.tif)
-        ├── P_2025-06-18_weekly.tif      # Lead 1
-        ├── P_2025-06-11_weekly.tif      # Lead 2
-        ├── P_2025-06-04_weekly.tif      # Lead 3
-        ├── P_2025-05-28_weekly.tif      # Lead 4
-        ├── P_2025-05-21_weekly.tif      # Lead 5
-        └── P_2025-05-14_weekly.tif      # Lead 6
-```
-
-#### 执行命令
+### 执行
 ```bash
-# 激活环境并运行完整验证
 conda activate torch
 python code/hindcast_verification_final.py
 ```
 
-### 输出结果
+输出: `figures/hindcast_china/` 目录下的ACC/RMSE/SPEI对比图和CSV数据表。
 
-#### 生成文件位置：`figures/hindcast_china/`
-1. **temperature_ACC_6weeks.png** - 温度异常相关系数对比图
-2. **precipitation_ACC_6weeks.png** - 降水异常相关系数对比图(含CAS-Canglong +0.15调整)
-3. **SPEI_agreement_6weeks.png** - SPEI同号率对比图
-4. **verification_6weeks_final.csv** - 完整验证指标数据表
+## 标准化评估体系
 
-绘图时采用Nature风格：
+### 评估数据集格式 — 目标周中心 (Target-Week-Centric)
 
+评估数据集采用**目标周中心**的组织方式：时间轴为连续的目标周（2017-2021全部52×5=260周），对于每个目标周，存储该周的ERA5观测值，以及不同提前量（lead 1-6周）的模型预测值。
+
+这种组织方式的优势：
+- **无冗余**: 每个目标周的观测只存一份（旧格式按初始化组织，同一周的obs被重复存储多次）
+- **时间连续**: 时间轴覆盖测试期全部周，支持时间序列分析
+- **直观对比**: 对同一日期，可直接看到真值和各提前量的预测，方便跨模型（AI/NWP）对比
+- **通用格式**: 任何预报模型（Canglong、ECMWF、Pangu等）均可用相同结构组织，统一对比
+
+#### 数据结构
+
+```text
+Dimensions:
+  time: 260 (目标周, 2017-2021连续)
+  lat:  721 (0.25°, 90°N → 90°S)
+  lon:  1440 (0.25°, 0° → 359.75°E)
+
+Coordinates:
+  time (time): datetime64 - 目标周日期 (CF-convention, xarray自动解析)
+  lat (lat): float32 - degrees_north
+  lon (lon): float32 - degrees_east
+
+Auxiliary Coordinates:
+  year (time): int32 - 目标周年份
+  woy (time): int32 - week-of-year (0-indexed, 用于气候态查表)
+  global_idx (time): int32 - Zarr全局时间索引
+
+Data Variables (float32, dims (time, lat, lon)):
+  obs_tp                   # 观测: 总降水 (lsrr+crr), kg/m²/s
+  pred_tp_lead1 ~ lead6    # 预测: 提前1~6周的总降水预报
+  obs_t2m                  # 观测: 2m温度, K
+  pred_t2m_lead1 ~ lead6   # 预测: 提前1~6周的2m温度预报
+  obs_olr                  # 观测: OLR, W/m² (V0 pred为NaN)
+  pred_olr_lead1 ~ lead6
+  obs_z500                 # 观测: 500hPa位势高度, m²/s²
+  pred_z500_lead1 ~ lead6
+  obs_u850                 # 观测: 850hPa纬向风, m/s (仅V3.5)
+  pred_u850_lead1 ~ lead6
+  obs_u200                 # 观测: 200hPa纬向风, m/s (仅V3.5)
+  pred_u200_lead1 ~ lead6
 ```
+
+V3.5: 6 obs + 36 pred = **42个变量**; V0: 4 obs + 24 pred = **28个变量**
+
+#### pred_lead{L} 的含义
+
+对于目标周 t，`pred_{var}_lead{L}` 是**提前 L 周**的自回归预报：
+
+```text
+pred_lead{L} 的生成过程:
+  初始化点: t - L - 1 (输入两周obs: [t-L-1, t-L])
+  自回归 L 步到达目标周 t
+
+示例: target = 2017-01-01, pred_tp_lead3
+  输入: [obs_2016-12-04, obs_2016-12-11]  (2周obs)
+  Step 1: [obs_wk-4, obs_wk-3] → pred_wk-2
+  Step 2: [obs_wk-3, pred_wk-2] → pred_wk-1
+  Step 3: [pred_wk-2, pred_wk-1] → pred_2017-01-01  ← pred_tp_lead3
+```
+
+| Lead | 初始化点 | obs输入 | 自回归步数 | 纯pred输入步数 |
+|------|---------|---------|-----------|---------------|
+| 1 | t - 2 | [t-2, t-1] | 1 | 0 |
+| 2 | t - 3 | [t-3, t-2] | 2 | 1 |
+| 3 | t - 4 | [t-4, t-3] | 3 | 2 |
+| 4 | t - 5 | [t-5, t-4] | 4 | 3 |
+| 5 | t - 6 | [t-6, t-5] | 5 | 4 |
+| 6 | t - 7 | [t-7, t-6] | 6 | 5 |
+
+Lead越大，自回归链越长，误差累积越多，预报技巧下降。
+
+#### 评估变量定义
+
+| 变量名 | 说明 | 物理单位 | Zarr Surface索引 | Zarr Upper索引 |
+|--------|------|----------|------------------|----------------|
+| tp | 总降水 (lsrr+crr) | kg/m²/s | surface[4]+surface[5] | - |
+| t2m | 2m温度 | K | surface[10] | - |
+| olr | 顶层净长波辐射 | W/m² | surface[1] (avg_tnlwrf) | - |
+| z500 | 500hPa位势高度 | m²/s² | - | upper[1, 2] |
+| u850 | 850hPa纬向风 | m/s | - | upper[3, 4] |
+| u200 | 200hPa纬向风 | m/s | - | upper[3, 0] |
+
+#### 气候态文件
+
+`Infer/eval/climatology_2002_2016.nc`: 52周气候平均值（2002-2016, 15年），用于计算异常和TCC。
+- `tp_clim(week, lat, lon)`: 总降水气候态
+- `t2m_clim(week, lat, lon)`: 2m温度气候态
+- `olr_clim(week, lat, lon)`: OLR气候态
+- `z500_clim(week, lat, lon)`: Z500气候态
+- week为0-indexed week-of-year，与NC中的 `woy` 坐标对应
+
+`Infer/eval/woy_map.npy`: Zarr全局索引 → week-of-year的映射数组。
+
+#### 已生成文件清单
+
+| 文件 | 大小 | 说明 |
+|------|------|------|
+| `Infer/eval/model_v3.nc` | 25 GB | V3.5: 6变量 (tp,t2m,olr,z500,u850,u200), 260周×6lead |
+| `Infer/eval/model_v0.nc` | 13 GB | V0: 4变量 (tp,t2m,olr,z500), pred_olr为NaN |
+| `Infer/eval/climatology_2002_2016.nc` | 398 MB | 52周气候态 (2002-2016, 15年) |
+| `Infer/eval/woy_map.npy` | 8.7 KB | Zarr全局索引→week-of-year映射 |
+
+#### 生成脚本
+
+```bash
+# 1. 气候态 (CPU)
+cd /home/lhwang/Desktop/CanglongPhysics
+/home/lhwang/anaconda3/envs/torch/bin/python Infer/compute_climatology.py
+
+# 2. V3.5评估数据集 (GPU, 输出~25GB)
+PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+/home/lhwang/anaconda3/envs/torch/bin/python Infer/gen_eval_v3.py
+
+# 3. V0评估数据集 (GPU, 输出~13GB, 必须从canglong/目录运行)
+cd /home/lhwang/Desktop/CanglongPhysics/canglong
+PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+/home/lhwang/anaconda3/envs/torch/bin/python ../Infer/gen_eval_v0.py
+```
+
+#### 离线指标计算（无需GPU）
+
+```python
+import xarray as xr
+import numpy as np
+
+ds = xr.open_dataset('Infer/eval/model_v3.nc')
+
+# === 空间PCC (单样本, lead 1) ===
+pred = ds['pred_t2m_lead1'].isel(time=0).values.ravel()
+obs = ds['obs_t2m'].isel(time=0).values.ravel()
+pcc = np.corrcoef(pred, obs)[0, 1]
+
+# === 逐lead全球平均PCC ===
+for lead in range(1, 7):
+    pred = ds[f'pred_t2m_lead{lead}'].values  # (260, 721, 1440)
+    obs = ds['obs_t2m'].values                # (260, 721, 1440)
+    pccs = [np.corrcoef(pred[i].ravel(), obs[i].ravel())[0,1]
+            for i in range(260)]
+    print(f'lead{lead}: t2m PCC = {np.mean(pccs):.4f}')
+
+# === RMSE ===
+rmse = np.sqrt(np.mean((pred - obs)**2))
+```
+
+#### 跨模型对比
+
+相同的目标周中心格式可用于组织任何预报模型的评估数据，方便统一对比：
+
+```python
+v0 = xr.open_dataset('Infer/eval/model_v0.nc')
+v3 = xr.open_dataset('Infer/eval/model_v3.nc')
+
+# 对比同一变量同一lead
+for lead in range(1, 7):
+    for name, ds in [('V0', v0), ('V3.5', v3)]:
+        pred = ds[f'pred_t2m_lead{lead}'].values
+        obs = ds['obs_t2m'].values
+        pccs = [np.corrcoef(pred[i].ravel(), obs[i].ravel())[0,1]
+                for i in range(260)]
+        print(f'{name} lead{lead}: t2m PCC = {np.mean(pccs):.4f}')
+
+# 扩展: 对比 Canglong vs NWP (相同格式)
+# ecmwf = xr.open_dataset('Infer/eval/model_ecmwf.nc')
+# diff = v3['pred_t2m_lead3'] - ecmwf['pred_t2m_lead3']
+```
+
+## MJO预测技巧评估
+
+### 方法
+
+MJO预测技巧通过双变量相关系数(bivariate COR)评估，基于实时多变量MJO指数(RMM)。
+
+1. **EOF分解**: 对ERA5 2002-2016热带带(15°N-15°S) cos(lat)加权经向平均的OLR、U850、U200周异常场进行联合EOF分解
+2. **RMM指数**: 将观测和预测的异常场投影到EOF1/EOF2上，得到RMM1和RMM2
+3. **双变量COR**: `COR(τ) = Σ[a1·b1 + a2·b2] / √(Σ[a1²+a2²] · Σ[b1²+b2²])`，COR ≥ 0.5 为有效预测
+4. **周尺度计算**: 所有变量在周平均尺度上处理
+
+### EOF统计
+
+- EOF1方差贡献: 23.8%, EOF2: 15.9%
+- 场标准差: OLR=11.19 W/m², U850=1.58 m/s, U200=4.67 m/s
+
+### V3.5 MJO COR (2017-2021)
+
+| Lead | 1 week | 2 weeks | 3 weeks | 4 weeks | 5 weeks | 6 weeks |
+|------|--------|---------|---------|---------|---------|---------|
+| **COR** | 0.808 | 0.599 | 0.460 | 0.394 | 0.325 | 0.276 |
+| **Skillful** | Yes | Yes | No | No | No | No |
+
+**有效预测时限: ~2.7周** (COR > 0.5)
+
+### 脚本与文件
+
+```bash
+# 首次运行需GPU (~50 min)，后续从缓存读取 (CPU)
+cd /home/lhwang/Desktop/CanglongPhysics
+PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+/home/lhwang/anaconda3/envs/torch/bin/python analysis/MJO/compute_mjo_skill.py
+```
+
+| 文件 | 说明 |
+|------|------|
+| `analysis/MJO/compute_mjo_skill.py` | MJO分析主脚本 (EOF + 推理 + RMM + COR + 绘图) |
+| `analysis/MJO/mjo_cache_v35.npz` | RMM索引缓存 (后续分析无需GPU) |
+| `analysis/MJO/mjo_cor_v35.png/svg` | COR vs Lead折线图 |
+| `analysis/MJO/mjo_results_v35.csv` | COR数值表 |
+
+注: V0模型因缺少OLR和200hPa层，无法计算标准RMM/MJO指标。
+
+## 关键依赖
+
+PyTorch, xarray, cartopy, salem, cmaps, rioxarray, timm, h5py
+
+## 附录：Nature风格绘图参数
+
+```python
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
+
 font_path = "/usr/share/fonts/arial/ARIAL.TTF"
 font_manager.fontManager.addfont(font_path)
-font_name = font_manager.FontProperties(fname=font_path).get_name()
-plt.rcParams['font.family'] = font_name
+plt.rcParams['font.family'] = 'Arial'
 mpl.rcParams['svg.fonttype'] = 'none'
-mpl.rcParams['svg.hashsalt'] = 'hello'
 
-# Set Nature style parameters
 plt.style.use('seaborn-v0_8-talk')
 plt.rcParams.update({
     'font.family': 'Arial',
@@ -893,32 +671,11 @@ plt.rcParams.update({
     'ytick.minor.size': 4,
     'xtick.major.width': 1.0,
     'ytick.major.width': 1.0,
-    'xtick.minor.width': 1.0,  # 新增：小刻度线宽度
-    'ytick.minor.width': 1.0,  # 新增：小刻度线宽度
-    'xtick.color': '#454545',  # 新增：x轴刻度线颜色
-    'ytick.color': '#454545',  # 新增：y轴刻度线颜色
+    'xtick.minor.width': 1.0,
+    'ytick.minor.width': 1.0,
+    'xtick.color': '#454545',
+    'ytick.color': '#454545',
     'savefig.bbox': 'tight',
     'savefig.transparent': False
 })
 ```
-
-
-
-#### 关键验证指标
-- **RMSE**: 均方根误差，衡量预报量级准确性
-- **ACC**: 异常相关系数，衡量空间模式相关性
-- **SPEI同号率**: 干旱/湿润状态预报一致性
-
-### 主要发现总结
-1. **温度预报**: CAS-Canglong在1-6周预报期均优于ECMWF (ACC: 0.97→0.94 vs 0.96→0.90)
-2. **降水预报**: ECMWF在短期(1-2周)表现更好，但随预报期延长优势递减
-3. **干旱预报**: CAS-Canglong在SPEI同号率方面显著优于ECMWF (0.85+ vs 0.50+)
-
-### 技术规格
-- **目标区域**: 中国区域 (70.5-139.5°E, 15-54°N)
-- **空间分辨率**: 1.5° (统一到ECMWF网格)
-- **时间分辨率**: 周平均
-- **预报期**: 1-6周
-- **验证时段**: 2025年第25周 (6月18-24日)
-
-此实现完全遵循CLAUDE.md中定义的预报检验模式规范，提供了完整的CAS-Canglong与ECMWF模式对比验证框架。

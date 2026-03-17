@@ -1,0 +1,1 @@
+start=2026-02-16 16:49:18 rank=2 pid=915114 device=cuda:2

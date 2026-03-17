@@ -1,0 +1,36 @@
+{
+  "model": "/home/lhwang/Desktop/CanglongPhysics/model/model_v3_5_continue_record_ft2_best.pth",
+  "forecast_start": "2026-02-05",
+  "forecast_end": "2026-12-31",
+  "target_months": [
+    "2026-02",
+    "2026-03",
+    "2026-04",
+    "2026-05",
+    "2026-06",
+    "2026-07",
+    "2026-08",
+    "2026-09",
+    "2026-10",
+    "2026-11",
+    "2026-12"
+  ],
+  "monthly_output": "/home/lhwang/Desktop/CanglongPhysics/analysis/operation/output/20260205_v35_ft2_best/operation_s2s_atmos_monthly_202602_202612.nc",
+  "seasonal_output": "/home/lhwang/Desktop/CanglongPhysics/analysis/operation/output/20260205_v35_ft2_best/operation_s2s_atmos_seasonal_2026.nc",
+  "weekly_output": null,
+  "tp_climatology_mode": "hybrid_first_old_rest_ecmwf",
+  "tp_climatology_paths": {
+    "2026-02": "/home/lhwang/Desktop/CanglongPhysics/analysis/operation/cache/tp_monthly_climatology_2000_2023.nc",
+    "2026-03": "/home/lhwang/Desktop/CanglongPhysics/analysis/operation/cache/tp_monthly_climatology_2000_2023_from_ecmwf_tp_global.nc",
+    "2026-04": "/home/lhwang/Desktop/CanglongPhysics/analysis/operation/cache/tp_monthly_climatology_2000_2023_from_ecmwf_tp_global.nc",
+    "2026-05": "/home/lhwang/Desktop/CanglongPhysics/analysis/operation/cache/tp_monthly_climatology_2000_2023_from_ecmwf_tp_global.nc",
+    "2026-06": "/home/lhwang/Desktop/CanglongPhysics/analysis/operation/cache/tp_monthly_climatology_2000_2023_from_ecmwf_tp_global.nc",
+    "2026-07": "/home/lhwang/Desktop/CanglongPhysics/analysis/operation/cache/tp_monthly_climatology_2000_2023_from_ecmwf_tp_global.nc",
+    "2026-08": "/home/lhwang/Desktop/CanglongPhysics/analysis/operation/cache/tp_monthly_climatology_2000_2023_from_ecmwf_tp_global.nc",
+    "2026-09": "/home/lhwang/Desktop/CanglongPhysics/analysis/operation/cache/tp_monthly_climatology_2000_2023_from_ecmwf_tp_global.nc",
+    "2026-10": "/home/lhwang/Desktop/CanglongPhysics/analysis/operation/cache/tp_monthly_climatology_2000_2023_from_ecmwf_tp_global.nc",
+    "2026-11": "/home/lhwang/Desktop/CanglongPhysics/analysis/operation/cache/tp_monthly_climatology_2000_2023_from_ecmwf_tp_global.nc",
+    "2026-12": "/home/lhwang/Desktop/CanglongPhysics/analysis/operation/cache/tp_monthly_climatology_2000_2023_from_ecmwf_tp_global.nc"
+  },
+  "note": "SST is intentionally not produced here; use analysis/operation/SSTmodel for ocean-model products."
+}

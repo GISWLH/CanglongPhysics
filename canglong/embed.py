@@ -240,7 +240,7 @@ class ImageToPatch3D(nn.Module):
 
     def forward(self, x: torch.Tensor):
         B, C, D, H, W = x.shape #
-        assert C == self.img_dims[0] and H == self.img_dims[1] and W == self.img_dims[2], \
+        assert D == self.img_dims[0] and H == self.img_dims[1] and W == self.img_dims[2], \
             f"输入图像尺寸 ({D}x{H}x{W}) 与模型预期 ({self.img_dims[0]}x{self.img_dims[1]}x{self.img_dims[2]}) 不符。"
         x = self.padding(x)
         x = self.projection(x)

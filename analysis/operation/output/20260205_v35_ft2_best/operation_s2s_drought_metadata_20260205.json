@@ -1,0 +1,11 @@
+{
+  "model": "/home/lhwang/Desktop/CanglongPhysics/model/model_v3_5_continue_record_ft2_best.pth",
+  "forecast_start": "2026-02-05",
+  "forecast_end": "2026-12-31",
+  "antecedent_obs_start": "2026-01-15",
+  "antecedent_obs_end": "2026-02-04",
+  "downloaded_antecedent_days": [],
+  "output": "/home/lhwang/Desktop/CanglongPhysics/analysis/operation/output/20260205_v35_ft2_best/operation_s2s_drought_weekly_spei4_china_20260205_20261231.nc",
+  "climate_source": "/home/lhwang/Desktop/CanglongPhysics/data/climate_variables_2000_2023_weekly.nc",
+  "note": "Surface antecedent history is auto-downloaded via CDS if missing. Pressure fields are not needed for antecedent SPEI-4 accumulation."
+}
